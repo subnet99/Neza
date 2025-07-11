@@ -1,0 +1,20 @@
+{
+    "video_prompt": {
+        "node_type": "WanVideoTextEncode",
+        "property": "inputs",
+        "index": 0,
+        "input_name": "positive_prompt"
+    },
+    "image_url": {
+        "node_type": "URLImageDownloader",
+        "property": "inputs",
+        "index": 0,
+        "input_name": "url"
+    },
+    "audio_url": {
+        "node_type": "URLAudioDownloader",
+        "property": "inputs",
+        "index": 0,
+        "input_name": "url"
+    }
+} 
