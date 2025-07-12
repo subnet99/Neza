@@ -504,7 +504,7 @@ class VideoVerifier:
         except Exception as e:
             bt.logging.error(f"Error verifying videos: {str(e)}")
             bt.logging.error(traceback.format_exc())
-            return 0.0, {}
+            return 0.0, {"error": str(e)}
 
     def verify_text_video(self, text, video_path):
         """
