@@ -90,6 +90,16 @@ class VideoMiner(BaseMinerNeuron):
             synapse.error = f"Request rejected: {reason}"
             return synapse
 
+        uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        stake = self.metagraph.S[uid].item()
+        if stake < 1000:
+            bt.logging.warning(
+                f"Blacklisting request from {synapse.dendrite.hotkey} [uid={uid}], not enough stake -- {stake}"
+            )
+            synapse.status_code = 403
+            synapse.error = f"Stake below minimum: {stake}"
+            return synapse
+
         if synapse.task_id and synapse.workflow_params:
             # Calculate task priority
             priority = await self.priority(synapse)

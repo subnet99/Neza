@@ -31,7 +31,7 @@ class ValidatorConfig:
         self.file_size_limit = 10
 
         # Task timeout configuration
-        self.task_timeout_seconds = 1800  # Default task timeout (1800 minutes)
+        self.task_timeout_seconds = 1800  # Default task timeout (30 minutes)
 
         # Miner selection configuration
         self.miner_selection = {
@@ -41,7 +41,7 @@ class ValidatorConfig:
 
         # Verification configuration
         self.verification = {
-            "max_concurrent_verifications": 8,  # Maximum concurrent verification workers
+            "max_concurrent_verifications": 1,  # Maximum concurrent verification workers
             "verification_sample_rate": 1.0,
             "new_miner_priority": True,  # Prioritize new miners
             "low_verification_threshold": 5,  # Low verification count threshold

@@ -22,6 +22,7 @@ from neurons.validator.workers.task_manager import TaskManager
 from neurons.validator.workers.miner_manager import MinerManager
 from neurons.validator.utils.penalty_manager import PenaltyManager
 from neurons.validator.workers.score_manager import MinerScoreManager
+from neurons.validator.workers.video_manager import VideoManager
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -62,7 +63,8 @@ class VideoValidator(BaseValidatorNeuron):
         self.score_manager.initialize(self.metagraph)
 
         # Initialize video verifier
-        self.verifier = VideoVerifier()
+        self.verifier = VideoVerifier(self)
+        self.video_manager = VideoManager()
 
         # Initialize managers
         self.miner_manager = MinerManager(self)
@@ -79,6 +81,7 @@ class VideoValidator(BaseValidatorNeuron):
         self.register_block_callback(self.update_materials_on_block)
         self.register_block_callback(self.move_scores_on_interval)
         self.register_block_callback(self.task_manager.process_tasks_on_block)
+        self.register_block_callback(self.video_manager.process_tasks_on_block)
 
         # Set API validator instance
         try:
@@ -192,7 +195,7 @@ class VideoValidator(BaseValidatorNeuron):
     async def _update_materials_async(self, block):
         """Asynchronously updates materials"""
         bt.logging.info("Refreshing materials...")
-        success = self.material_manager.update_materials_info()
+        success = await self.material_manager._update_materials_info(force=False)
         if success:
             bt.logging.info("Materials refreshed successfully")
         else:

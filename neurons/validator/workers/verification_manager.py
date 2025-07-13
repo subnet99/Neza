@@ -149,11 +149,7 @@ class VerificationManager:
                 )
 
                 try:
-                    # Execute verification
                     await self._execute_verification(task_id, miner_hotkey, miner_uid)
-
-                    # Add miner to verified miners set
-                    self.verified_miners.add(miner_hotkey)
 
                 except Exception as e:
                     bt.logging.error(f"Error verifying task {task_id}: {str(e)}")
@@ -165,6 +161,8 @@ class VerificationManager:
                     )
 
                 finally:
+                    # Add miner to verified miners set
+                    self.verified_miners.add(miner_hotkey)
                     # Remove from verifying tasks
                     if task_id in self.verifying_tasks:
                         self.verifying_tasks.remove(task_id)
@@ -313,7 +311,6 @@ class VerificationManager:
         try:
             # Get task parameters
             task_id = task_details.get("task_id")
-            miner_video_url = task_details.get("s3_video_url")
 
             # Get completion time if available
             completion_time = None
@@ -327,8 +324,8 @@ class VerificationManager:
             complete_workflow = self._get_complete_workflow(task_details)
 
             # Perform verification
-            score, result = self._perform_verification(
-                task_id, complete_workflow, miner_video_url, completion_time
+            score, result = await self._perform_verification(
+                task_id, complete_workflow, completion_time
             )
 
             return score, result
@@ -381,8 +378,8 @@ class VerificationManager:
             bt.logging.error(f"Error getting complete workflow: {str(e)}")
             return {}
 
-    def _perform_verification(
-        self, task_id, complete_workflow, miner_video_url, completion_time=None
+    async def _perform_verification(
+        self, task_id, complete_workflow, completion_time=None
     ):
         """
         Performs verification using video verifier
@@ -390,7 +387,6 @@ class VerificationManager:
         Args:
             task_id: Task ID
             complete_workflow: Complete workflow
-            miner_video_url: URL to miner's video result
             completion_time: Task completion time in seconds
 
         Returns:
@@ -398,13 +394,12 @@ class VerificationManager:
         """
         try:
             # Log verification
-            bt.logging.info(f"Verifying task {task_id} with URL {miner_video_url}")
+            bt.logging.info(f"Verifying task {task_id}")
 
             # Use video verifier
-            score, result = self.validator.verifier.verify_task(
+            score, result = await self.validator.verifier.verify_task(
                 task_id=task_id,
                 complete_workflow=complete_workflow,
-                miner_video_url=miner_video_url,
                 completion_time=completion_time,
             )
 
@@ -601,7 +596,7 @@ class VerificationManager:
                 future = asyncio.run_coroutine_threadsafe(
                     self.verification_queue.put(task), self.verification_loop
                 )
-                future.result(timeout=60.0)
+                future.result(timeout=180.0)
                 bt.logging.debug(f"Added task {task_id} to verification queue")
                 return True
             except Exception as e:

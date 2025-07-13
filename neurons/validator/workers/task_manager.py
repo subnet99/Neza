@@ -993,6 +993,10 @@ class TaskManager:
                         bt.logging.info(
                             f"Task {task_id} completed by miner {miner_hotkey[:10] if miner_hotkey else 'None'}, file_size: {file_size}, last_modified: {last_modified}"
                         )
+                        # Pre-download video to cache directory
+                        await self.validator.video_manager.download_video(
+                            task_id, video_url, "miner"
+                        )
 
                         # Update task in database
                         await self._db_op(
@@ -1060,12 +1064,20 @@ class TaskManager:
             current_verifying = len(self.validator.verification_manager.verifying_tasks)
             available_capacity = max(0, max_capacity - current_verifying)
 
+            # Get queue size
+            queue_size = 0
+            if hasattr(self.validator.verification_manager, "verification_queue"):
+                queue_size = (
+                    self.validator.verification_manager.verification_queue.qsize()
+                )
+
             bt.logging.debug(
-                f"Verification capacity: {current_verifying}/{max_capacity}, available: {available_capacity}"
+                f"Verification capacity: {current_verifying}/{max_capacity}, available: {available_capacity}, queue: {queue_size}"
             )
 
-            # If available capacity, select task for verification
-            if available_capacity > 0:
+            # Calculate fetch capacity: max_capacity * 1.5 but not exceeding max_capacity
+            # If no available capacity but queue is empty, get at least 1 task
+            if available_capacity > 0 or queue_size == 0:
                 # Use miner selection strategy based on verification density
                 sorted_tasks = (
                     self.validator.verification_manager.select_tasks_for_verification(
@@ -1074,14 +1086,15 @@ class TaskManager:
                 )
 
                 # Select task based on available capacity
-                task_count = min(available_capacity, len(sorted_tasks))
+                fetch_capacity = min(max_capacity, max(1, int(max_capacity * 1.5)))
+                task_count = min(fetch_capacity, len(sorted_tasks))
                 task_count = max(1, task_count) if sorted_tasks else 0
 
                 # Select task
                 selected_tasks = sorted_tasks[:task_count]
 
                 bt.logging.info(
-                    f"Selected {len(selected_tasks)} tasks for verification based on verification density"
+                    f"Selected {len(selected_tasks)} tasks for verification (fetch: {fetch_capacity})"
                 )
 
                 # Add task to verification queue
@@ -1102,20 +1115,18 @@ class TaskManager:
                                 status="verifying",
                             )
 
+                            bt.logging.warning(
+                                f"Update the status of task {task_id} to verifying"
+                            )
+
                             # Try to add task to verification queue
                             success = self.validator.verification_manager.add_verification_task(
                                 {"task_id": task_id, "miner_hotkey": miner_hotkey}
                             )
 
-                            # If failed to add to queue, roll back status to "completed"
                             if not success:
                                 bt.logging.warning(
-                                    f"Failed to add task {task_id} to verification queue, rolling back status"
-                                )
-                                await self._db_op(
-                                    self.db.update_task_status,
-                                    task_id=task_id,
-                                    status="completed",  # Roll back to previous status
+                                    f"Failed to add task {task_id} to verification queue"
                                 )
                             else:
                                 bt.logging.debug(
@@ -1127,18 +1138,6 @@ class TaskManager:
                                 f"Error managing verification for task {task_id}: {str(e)}"
                             )
                             bt.logging.error(traceback.format_exc())
-
-                            # Attempt to roll back status on any exception
-                            try:
-                                await self._db_op(
-                                    self.db.update_task_status,
-                                    task_id=task_id,
-                                    status="completed",
-                                )
-                            except Exception as rollback_error:
-                                bt.logging.error(
-                                    f"Failed to roll back task status: {str(rollback_error)}"
-                                )
 
         except Exception as e:
             bt.logging.error(f"Error verifying completed tasks: {str(e)}")

@@ -27,10 +27,11 @@ class VideoVerifier:
     _device = None
     _comfy_api = ComfyAPI()
 
-    def __init__(self):
+    def __init__(self, validator):
         """Initialize video verifier"""
         self.model, self.device = self._get_model()
         self.temp_dir = None
+        self.validator = validator
         if VideoVerifier._comfy_api is None:
             VideoVerifier._comfy_api = ComfyAPI()
 
@@ -45,16 +46,13 @@ class VideoVerifier:
             cls._model_instance.to(cls._device)
         return cls._model_instance, cls._device
 
-    def verify_task(
-        self, task_id, complete_workflow, miner_video_url, completion_time=None
-    ):
+    async def verify_task(self, task_id, complete_workflow, completion_time=None):
         """
         Complete verification flow: execute ComfyUI workflow, download miner video, compare similarity
 
         Args:
             task_id: Task ID
             complete_workflow: Complete workflow configuration
-            miner_video_url: Miner video URL
             completion_time: Task completion time in seconds
 
         Returns:
@@ -112,10 +110,11 @@ class VideoVerifier:
                 f"http://{host}:{port}/view?filename={output_filename}&type=output"
             )
 
-            # Download validator-generated video to local temporary directory
-            validator_video_path = os.path.join(self.temp_dir, "validator_video.mp4")
-            download_success = self.download_video(
-                validator_output_url, validator_video_path
+            # Download validator-generated video using video manager
+            download_success, validator_video_path = (
+                await self.validator.video_manager.download_video(
+                    task_id, validator_output_url, "validator"
+                )
             )
 
             if not download_success:
@@ -124,15 +123,18 @@ class VideoVerifier:
                 )
                 return None, {"error": "Failed to download validator video"}
 
-            # 2. Download miner video
-            bt.logging.info(f"Downloading miner video: {miner_video_url}")
-            miner_video_path = os.path.join(self.temp_dir, "miner_video.mp4")
-            download_success = self.download_video(miner_video_url, miner_video_path)
+            # 2. Get miner video path from video manager
+            miner_video_path = self.validator.video_manager.get_video_cache_paths(
+                task_id, "miner"
+            )
 
-            if not download_success:
-                bt.logging.error(f"Unable to download miner video: {miner_video_url}")
-                # Temporarily use validator video as miner video (for testing only)
-                miner_video_path = validator_video_path
+            # Check if miner video exists
+            if (
+                not os.path.exists(miner_video_path)
+                or os.path.getsize(miner_video_path) == 0
+            ):
+                bt.logging.error(f"Miner video not found or empty: {miner_video_path}")
+                return 0.0, {"error": "Failed to get miner video"}
 
             # 3. Verify video similarity
             bt.logging.info(f"Comparing video similarity: {task_id}")
@@ -157,9 +159,6 @@ class VideoVerifier:
             bt.logging.error(f"Verification task failed: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return 0.0, {"error": str(e)}
-        finally:
-            # Clean up temporary directory
-            self.cleanup_temp_dir()
 
     def run_comfy_workflow(self, complete_workflow):
         """
@@ -277,92 +276,6 @@ class VideoVerifier:
             bt.logging.error(f"Error executing ComfyUI workflow: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return None, 0
-
-    def download_video(self, url, save_path, max_retries=3, timeout=60):
-        """
-        Download video from URL
-
-        Args:
-            url: Video URL
-            save_path: Path to save the video
-            max_retries: Maximum number of retry attempts
-            timeout: Download timeout in seconds
-
-        Returns:
-            bool: Whether download was successful
-        """
-        # Check if URL is S3
-        parsed_url = urlparse(url)
-        if parsed_url.netloc.endswith("amazonaws.com") or parsed_url.netloc.endswith(
-            "digitaloceanspaces.com"
-        ):
-            return self.download_from_s3(url, save_path)
-
-        # Regular HTTP download
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                bt.logging.info(f"Downloading video from {url} to {save_path}")
-                response = requests.get(url, stream=True, timeout=timeout)
-                response.raise_for_status()
-
-                # Save to file
-                with open(save_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-
-                # Check if file exists and has size > 0
-                if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
-                    bt.logging.info(f"Video download successful: {save_path}")
-                    return True
-                else:
-                    bt.logging.warning(f"Downloaded file is empty: {save_path}")
-                    retry_count += 1
-                    time.sleep(1)
-
-            except requests.exceptions.RequestException as e:
-                bt.logging.error(f"Error downloading video: {str(e)}")
-                retry_count += 1
-                time.sleep(1)
-
-        bt.logging.error(f"Failed to download video after {max_retries} attempts")
-        return False
-
-    def download_from_s3(self, s3_url, save_path):
-        """
-        Download file from S3 URL
-
-        Args:
-            s3_url: S3 URL
-            save_path: Path to save the file
-
-        Returns:
-            bool: Whether download was successful
-        """
-        try:
-            bt.logging.info(f"Downloading from S3: {s3_url}")
-            response = requests.get(s3_url, stream=True)
-            response.raise_for_status()
-
-            with open(save_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-
-            return os.path.exists(save_path) and os.path.getsize(save_path) > 0
-        except Exception as e:
-            bt.logging.error(f"Error downloading from S3: {str(e)}")
-            return False
-
-    def cleanup_temp_dir(self):
-        """Clean up temporary directory"""
-        try:
-            if self.temp_dir and os.path.exists(self.temp_dir):
-                bt.logging.info(f"Cleaning up temporary directory: {self.temp_dir}")
-                shutil.rmtree(self.temp_dir)
-        except Exception as e:
-            bt.logging.error(f"Error cleaning up temporary directory: {str(e)}")
 
     def verify_videos(
         self,
