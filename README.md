@@ -26,17 +26,13 @@ Neza shards advanced generation models like WAN2.1 across the network. Validator
 3. [Hardware Requirements](#hardware-requirements)  
    - [Miner Recommended Configuration](#miner-recommended-configuration)  
    - [Validator Recommended Configuration](#validator-recommended-configuration)  
-4. [Installation](#installation)  
-5. [How to Run Neza](#how-to-run-neza)  
+4. [How to Run Neza](#how-to-run-neza)  
    - [Running a Miner](#running-a-miner)  
-     - [ComfyUI Interface Configuration](#comfyui-interface-configuration)  
-     - [Miner Startup Command](#miner-startup-command)  
    - [Running a Validator](#running-a-validator)  
-     - [Validator Startup Command](#validator-startup-command)  
-6. [Workflow Mechanism](#workflow-mechanism)  
+5. [Workflow Mechanism](#workflow-mechanism)  
    - [Synthetic Workflows](#synthetic-workflows)  
    - [Organic Workflows](#organic-workflows)  
-7. [Miner Optimization Directions](#miner-optimization-directions)  
+6. [Miner Optimization Directions](#miner-optimization-directions)  
    - [Hardware Optimization](#hardware-optimization)  
    - [Concurrent Processing](#concurrent-processing)
 
@@ -87,32 +83,11 @@ System requirements:
 
 Validators run multiple video validation tasks in parallel and execute the compute-intensive ImageBind model for quality checks, so they require more powerful hardware to keep the network running smoothly.  
 
-## Installation
-
-Please refer to the [Installation Guide](docs/installation.md) for detailed installation steps.
-
 ## How to Run Neza
 
 ### Running a Miner
 
-Miner nodes run on ComfyUI and must be configured with the appropriate video models to handle generation requests.  
-
-#### ComfyUI Interface Configuration
-
-Miners must set up ComfyUI with the required video models (see [Model List](docs/models.md)).  
-
-Miners use the ComfyAPI (default endpoint: `http://127.0.0.1:8188`) to communicate with ComfyUI. To connect to multiple servers, set the `COMFYUI_SERVERS` environment variable to a comma-separated list of URLs.  
-
-#### Miner Startup Command
-
-```bash
-python3 neurons/miner.py \
-  --netuid 99 \
-  --wallet.name [wallet_name] \
-  --wallet.hotkey [hotkey] \
-  --subtensor.network [network_name] \
-  --logging.trace
-```
+Please refer to the [Miner Installation Guide](docs/miner_installation_guide.md).
 
 Miners implement a task queue to handle multiple concurrent workflows and expose task status queries. Upon receiving a workflow from a validator, the miner will:
 
@@ -122,18 +97,7 @@ Miners implement a task queue to handle multiple concurrent workflows and expose
 
 ### Running a Validator
 
-Validators handle workflow configurations—retrieving or defining them, dispatching them to miners for execution, and validating the quality of the generated videos.
-
-#### Validator Startup Command
-
-```bash
-python3 neurons/validator.py \
-  --netuid 99 \
-  --wallet.name [wallet_name] \
-  --wallet.hotkey [hotkey] \
-  --subtensor.network [network_name] \
-  --logging.trace
-```
+Please refer to the [Validator Installation Guide](docs/validator_installation_guide.md).
 
 Validators use the `VideoVerifier` (built on ImageBind) to assess generated videos through the following steps:
 
@@ -143,8 +107,6 @@ Validators use the `VideoVerifier` (built on ImageBind) to assess generated vide
 4. Evaluate video quality with ImageBind  
 5. Score miners on quality and response time  
 6. Normalize scores to determine subnet weights  
-
-They also run asynchronous pipelines that dispatch tasks to multiple miners in parallel and compare outputs.
 
 ## Workflow Mechanism
 
@@ -156,7 +118,7 @@ Synthetic workflows are preset test tasks defined by validators to benchmark min
 
 ### Organic Workflows
 
-Organic workflows come from real user requests. Neza lets Validators push these requests straight into the database so validators can dispatch them to miners in real time—ensuring miners not only run benchmark tests but also fulfill actual needs.
+Organic workflows come from real user requests. Validators push these requests straight into the database so validators can dispatch them to miners in real time—ensuring miners not only run benchmark tests but also fulfill actual needs.
 
 
 ## Miner Optimization Directions

@@ -37,6 +37,7 @@ class ValidatorConfig:
         self.miner_selection = {
             "generate_max_tasks": 1,  # Maximum synthetic tasks
             "density_float_ratio": 0.003,  # Task density float ratio (0.3%)
+            "use_random_selection": True,  # Whether to use random selection instead of density algorithm
         }
 
         # Verification configuration

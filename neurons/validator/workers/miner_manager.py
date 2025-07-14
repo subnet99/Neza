@@ -419,7 +419,7 @@ class MinerManager:
 
     async def select_miners_for_tasks(self, miners_with_capacity, task_count):
         """
-        Selects miners for tasks based on density algorithm to ensure fair task distribution
+        Selects miners for tasks based on configuration
 
         Args:
             miners_with_capacity: List of miners with capacity info
@@ -436,71 +436,67 @@ class MinerManager:
         if count == 0:
             return []
 
-        # Calculate miners density
-        miners_with_density = await self._calculate_miners_density(miners_with_capacity)
-
-        # Sort miners by density (descending) to prioritize miners with higher density
-        sorted_miners = sorted(
-            miners_with_density, key=lambda m: m.get("density", 0), reverse=True
+        # Check if random selection is enabled in config
+        use_random = self.validator.validator_config.miner_selection.get(
+            "use_random_selection", True
         )
 
-        # Select top miners
-        selected_miners = sorted_miners[:count]
+        if use_random:
+            # Use random selection
+            selected_miners = await self._select_miners_randomly(
+                miners_with_capacity, count
+            )
 
-        # Format selected miners for logging
-        formatted_miners = self._format_selected_miners(selected_miners, count)
+            # Format selected miners for logging
+            formatted_miners = self._format_selected_miners_random(selected_miners)
 
-        bt.logging.info(
-            f"Selected {len(selected_miners)} miners for tasks (density-based): {formatted_miners}"
-        )
+            bt.logging.info(
+                f"Selected {len(selected_miners)} miners for tasks (randomly): {formatted_miners}"
+            )
+        else:
+            # Use density-based selection
+            miners_with_density = await self._calculate_miners_density(
+                miners_with_capacity
+            )
+
+            # Sort miners by density (descending) to prioritize miners with higher density
+            sorted_miners = sorted(
+                miners_with_density, key=lambda m: m.get("density", 0), reverse=True
+            )
+
+            # Select top miners
+            selected_miners = sorted_miners[:count]
+
+            # Format selected miners for logging
+            formatted_miners = self._format_selected_miners(selected_miners, count)
+
+            bt.logging.info(
+                f"Selected {len(selected_miners)} miners for tasks (density-based): {formatted_miners}"
+            )
+
         return selected_miners
 
-    async def _select_miners_round_robin(self, miners_with_capacity, count=1):
+    async def _select_miners_randomly(self, miners_with_capacity, count):
         """
-        Selects miners using round-robin algorithm to ensure equal task distribution
+        Selects miners randomly to ensure fair task distribution
 
         Args:
-            miners_with_capacity: List of miners with capacity
+            miners_with_capacity: List of miners with capacity info
             count: Number of miners to select
 
         Returns:
             List of selected miners
         """
-        # Filter valid miners
-        valid_miners = miners_with_capacity
+        # Filter valid miners with capacity
+        valid_miners = self._filter_valid_miners(miners_with_capacity)
         if not valid_miners:
             return []
 
-        # Get task counts for all miners
-        task_counts = {}
-        try:
-            # Get from database
-            creation_info = (
-                self.validator.task_manager.db.get_miners_task_creation_info()
-            )
+        # Randomly shuffle the miners
+        shuffled_miners = random.sample(valid_miners, len(valid_miners))
 
-            # Format as dict keyed by hotkey
-            for info in creation_info:
-                task_counts[info["hotkey"]] = info["task_count"]
-        except Exception as e:
-            bt.logging.error(f"Error getting miners task counts: {str(e)}")
-            # Continue with empty task counts if there's an error
-
-        # Add task count to miners and sort by task count (ascending)
-        for miner in valid_miners:
-            miner["task_count"] = task_counts.get(miner["hotkey"], 0)
-
-        # Sort miners by task count (ascending) to prioritize miners with fewer tasks
-        sorted_miners = sorted(valid_miners, key=lambda m: m["task_count"])
-
-        # Select top miners
-        selected_miners = sorted_miners[:count]
-
-        # Log selection
-        for miner in selected_miners:
-            bt.logging.debug(
-                f"Selected miner {miner['hotkey'][:10]}... (UID {miner['uid']}) with {miner['task_count']} previous tasks"
-            )
+        # Select miners up to the requested count
+        selected_miners = shuffled_miners[:count]
 
         return selected_miners
 
@@ -629,3 +625,67 @@ class MinerManager:
         bt.logging.debug(
             f"Selected miner {hotkey} (UID {uid}) with density {density:.6f}"
         )
+
+    def _format_selected_miners_random(self, selected_miners):
+        """Formats randomly selected miners for logging"""
+        if not selected_miners:
+            return "None"
+
+        # Format miner info
+        miner_info = []
+        for miner in selected_miners:
+            uid = miner["uid"]
+            hotkey = miner["hotkey"][:10] + "..."
+
+            miner_info.append(f"{hotkey}({uid})")
+
+        return ", ".join(miner_info)
+
+    async def _select_miners_round_robin(self, miners_with_capacity, count=1):
+        """
+        Selects miners using round-robin algorithm to ensure equal task distribution
+
+        Args:
+            miners_with_capacity: List of miners with capacity
+            count: Number of miners to select
+
+        Returns:
+            List of selected miners
+        """
+        # Filter valid miners
+        valid_miners = miners_with_capacity
+        if not valid_miners:
+            return []
+
+        # Get task counts for all miners
+        task_counts = {}
+        try:
+            # Get from database
+            creation_info = (
+                self.validator.task_manager.db.get_miners_task_creation_info()
+            )
+
+            # Format as dict keyed by hotkey
+            for info in creation_info:
+                task_counts[info["hotkey"]] = info["task_count"]
+        except Exception as e:
+            bt.logging.error(f"Error getting miners task counts: {str(e)}")
+            # Continue with empty task counts if there's an error
+
+        # Add task count to miners and sort by task count (ascending)
+        for miner in valid_miners:
+            miner["task_count"] = task_counts.get(miner["hotkey"], 0)
+
+        # Sort miners by task count (ascending) to prioritize miners with fewer tasks
+        sorted_miners = sorted(valid_miners, key=lambda m: m["task_count"])
+
+        # Select top miners
+        selected_miners = sorted_miners[:count]
+
+        # Log selection
+        for miner in selected_miners:
+            bt.logging.debug(
+                f"Selected miner {miner['hotkey'][:10]}... (UID {miner['uid']}) with {miner['task_count']} previous tasks"
+            )
+
+        return selected_miners
