@@ -4,11 +4,13 @@ import time
 import threading
 import traceback
 from typing import List, Dict, Any, Optional, Set, Tuple
+from datetime import datetime
 
 import bittensor as bt
 import torch
 import asyncio
 import numpy as np
+import wandb
 
 from neza.base.validator import BaseValidatorNeuron
 from neza.api.utils import set_validator
@@ -75,6 +77,19 @@ class VideoValidator(BaseValidatorNeuron):
         # Initialize miner info cache
         self.miner_info_cache = None
 
+        # Initialize wandb run
+        self.wandb_run_start_time = None
+        if not self.config.wandb.off:
+            if os.getenv("WANDB_API_KEY"):
+                self.new_wandb_run()
+            else:
+                bt.logging.exception(
+                    "WANDB_API_KEY not found in environment variables, skipping wandb run"
+                )
+                self.config.wandb.off = True
+        else:
+            bt.logging.warning("WANDB is disabled, skipping wandb run")
+
         # Register block callbacks
         self.register_block_callback(self.miner_manager.update_miners_on_block)
         self.register_block_callback(self.manage_verification_cycle)
@@ -101,7 +116,7 @@ class VideoValidator(BaseValidatorNeuron):
         """
         Validator forward pass, handles task scheduling and monitoring
         """
-        await asyncio.sleep(60)
+        await asyncio.sleep(1800)
 
     def manage_verification_cycle(self, block):
         """
@@ -444,9 +459,14 @@ class VideoValidator(BaseValidatorNeuron):
                     hotkey=hotkey, task_id=task_id, score=score
                 )
 
-                bt.logging.debug(
-                    f"Recorded score {score:.4f} for UID {uid} on task {task_id}"
-                )
+                if score is not None:
+                    bt.logging.debug(
+                        f"Recorded score {score:.4f} for UID {uid} on task {task_id}"
+                    )
+                else:
+                    bt.logging.debug(
+                        f"Recorded None score for UID {uid} on task {task_id}"
+                    )
 
             # If using base class set_weights method, update base class scores periodically
             self.task_counter += 1
@@ -503,3 +523,25 @@ class VideoValidator(BaseValidatorNeuron):
             self.score_manager.finalize_epoch()
 
             bt.logging.info("Score movement complete, cache saved")
+
+    def new_wandb_run(self):
+        """
+        Create a new wandb run
+        """
+        now = datetime.now()
+        run_id = now.strftime("%y%m%d%H%M%S")
+
+        self.wandb_run_start_time = now
+        self.wandb_run = wandb.init(
+            name=f"validator-{self.uid}-{run_id}",
+            entity=self.config.wandb.entity,
+            project=self.config.wandb.project_name,
+            config={
+                "uid": self.uid,
+                "hotkey": self.wallet.hotkey.ss58_address,
+                "run_id": run_id,
+                "type": "validator",
+            },
+            allow_val_change=True,
+            anonymous="allow",
+        )

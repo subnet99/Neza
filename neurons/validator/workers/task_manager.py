@@ -55,6 +55,14 @@ class TaskManager:
         # Last task creation time
         self.last_task_creation_time = 0
 
+        # Task density cycle management
+        self.sended_miners = (
+            {}
+        )  # Dict of miners that received tasks in current cycle, mapping hotkey to task count
+        self.task_density_cycle_start = (
+            time.time()
+        )  # Current task density cycle start time
+
         bt.logging.info("Task manager initialized with block-based processing")
 
     def start(self):
@@ -135,9 +143,40 @@ class TaskManager:
             # Process retry tasks
             await self._process_retry_tasks()
 
+            # Check if task density cycle needs reset
+            self._check_task_density_cycle()
+
         except Exception as e:
             bt.logging.error(f"Error processing tasks: {str(e)}")
             bt.logging.error(traceback.format_exc())
+
+    def _check_task_density_cycle(self):
+        """
+        Checks if task density cycle needs to be reset
+        Uses the same cycle length as verification cycle
+        """
+        current_time = time.time()
+        cycle_length = self.validator.validator_config.miner_selection[
+            "send_cycle_length"
+        ]
+
+        # Check if cycle has elapsed
+        if current_time - self.task_density_cycle_start > cycle_length:
+            self.reset_task_density_cycle()
+
+    def reset_task_density_cycle(self):
+        """
+        Resets task density cycle
+        Clears the dict of miners that received tasks in the current cycle
+        """
+        # Reset cycle start time
+        self.task_density_cycle_start = time.time()
+
+        # Reset sended miners
+        old_count = len(self.sended_miners)
+        self.sended_miners = {}
+
+        bt.logging.info(f"Reset task density cycle, cleared {old_count} sended miners")
 
     async def _db_op(self, func, *args, **kwargs):
         """
@@ -268,18 +307,11 @@ class TaskManager:
 
             bt.logging.info(f"Processing {len(pending_tasks)} pending tasks")
 
-            # Select miners for tasks
-            selected_miners = (
-                await self.validator.miner_manager.select_miners_for_tasks(
-                    miners_with_capacity, len(pending_tasks)
-                )
+            # Select miners for tasks using task density algorithm
+            selected_miners = await self._select_miners_by_task_density(
+                miners_with_capacity, len(pending_tasks)
             )
 
-            if not selected_miners:
-                bt.logging.warning("No miners available for pending tasks")
-                return 0
-
-            # Assign tasks to miners
             await self._assign_tasks_to_miners(
                 pending_tasks, selected_miners, miners_with_capacity
             )
@@ -287,7 +319,7 @@ class TaskManager:
             return len(pending_tasks)
 
         except Exception as e:
-            bt.logging.error(f"Error processing DB pending tasks: {str(e)}")
+            bt.logging.error(f"Error processing pending tasks: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return 0
 
@@ -355,6 +387,16 @@ class TaskManager:
                 if success:
                     # Update miner load
                     self._update_miner_load_after_task(miners_with_capacity, miner)
+
+                # Update task count in sended_miners
+                if miner_hotkey in self.sended_miners:
+                    self.sended_miners[miner_hotkey] += 1
+                else:
+                    self.sended_miners[miner_hotkey] = 1
+
+                bt.logging.debug(
+                    f"Updated task count for miner {miner_hotkey[:10]}... to {self.sended_miners[miner_hotkey]}"
+                )
 
         except Exception as e:
             bt.logging.error(f"Error assigning tasks to miners: {str(e)}")
@@ -468,10 +510,72 @@ class TaskManager:
         Returns:
             List of selected miners
         """
-        # Use miner manager to select miners
-        return await self.validator.miner_manager.select_miners_for_tasks(
+        # Use task density based selection
+        return await self._select_miners_by_task_density(
             miners_with_capacity, max_tasks
         )
+
+    async def _select_miners_by_task_density(self, miners_with_capacity, task_count):
+        """
+        Selects miners for tasks based on task density
+        Similar to verification density but for task assignment
+
+        Args:
+            miners_with_capacity: List of miners with capacity info
+            task_count: Number of miners to select
+
+        Returns:
+            List of selected miners
+        """
+        if not miners_with_capacity:
+            return []
+
+        # Adjust count based on available miners
+        count = min(task_count, len(miners_with_capacity))
+        if count == 0:
+            return []
+
+        # Filter valid miners with capacity
+        valid_miners = [m for m in miners_with_capacity if m["remaining_capacity"] > 0]
+        if not valid_miners:
+            return []
+
+        # Calculate task density for each miner based on sended_miners
+        miners_with_density = []
+        for miner in valid_miners:
+            hotkey = miner["hotkey"]
+
+            # Get task count for this miner in current cycle, default to 0 if not found
+            task_count = self.sended_miners.get(hotkey, 0)
+
+            # Calculate density (similar to verification density)
+            # Lower task count = lower density = higher priority
+            density = task_count  # Simple density based on number of tasks sent in current cycle
+
+            # Get float ratio from config
+            float_ratio = self.validator.validator_config.miner_selection[
+                "density_float_ratio"
+            ]
+
+            # Calculate float range
+            float_range = max(
+                0.001, density * float_ratio
+            )  # Ensure minimum float range
+
+            # Apply random float within range
+            random_factor = random.uniform(1.0 - float_range, 1.0 + float_range)
+            density = density * random_factor
+
+            # Add to miners with density
+            miners_with_density.append({**miner, "density": density})
+
+        # Sort miners by density (ascending) to prioritize miners with lower density
+        sorted_miners = sorted(miners_with_density, key=lambda m: m.get("density", 0))
+
+        # Select top miners
+        selected_miners = sorted_miners[:count]
+
+        return selected_miners
 
     def _log_available_miners(self, miners_with_capacity):
         """
@@ -583,6 +687,17 @@ class TaskManager:
                     task.timeout_seconds,
                     miner,
                     available_miners,
+                )
+
+                # Update task count in sended_miners
+                miner_hotkey = miner.get("hotkey")
+                if miner_hotkey in self.sended_miners:
+                    self.sended_miners[miner_hotkey] += 1
+                else:
+                    self.sended_miners[miner_hotkey] = 1
+
+                bt.logging.debug(
+                    f"Updated task count for miner {miner_hotkey[:10]}... to {self.sended_miners[miner_hotkey]}"
                 )
 
         except Exception as e:

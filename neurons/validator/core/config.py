@@ -35,9 +35,9 @@ class ValidatorConfig:
 
         # Miner selection configuration
         self.miner_selection = {
+            "send_cycle_length": 144 * 60,  # send cycle length in seconds (144 minutes)
             "generate_max_tasks": 1,  # Maximum synthetic tasks
             "density_float_ratio": 0.003,  # Task density float ratio (0.3%)
-            "use_random_selection": True,  # Whether to use random selection instead of density algorithm
         }
 
         # Verification configuration

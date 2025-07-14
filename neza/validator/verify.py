@@ -30,7 +30,6 @@ class VideoVerifier:
     def __init__(self, validator):
         """Initialize video verifier"""
         self.model, self.device = self._get_model()
-        self.temp_dir = None
         self.validator = validator
         if VideoVerifier._comfy_api is None:
             VideoVerifier._comfy_api = ComfyAPI()
@@ -59,12 +58,6 @@ class VideoVerifier:
             tuple: (score, verification result dictionary)
         """
         try:
-            # Create temporary directory
-            self.temp_dir = os.path.join(
-                tempfile.gettempdir(), f"verification_{task_id}_{uuid.uuid4().hex}"
-            )
-            os.makedirs(self.temp_dir, exist_ok=True)
-
             bt.logging.info(f"Starting verification for task {task_id}")
 
             # 1. Execute ComfyUI workflow to generate verification video
@@ -94,14 +87,14 @@ class VideoVerifier:
 
             if not output_filename:
                 bt.logging.error(f"Validator failed to generate video: {task_id}")
-                return None, {"error": "Failed to generate verification video"}
+                return 0.0, {"error": "Failed to generate verification video"}
 
             # Convert filename to complete URL path
             # Get ComfyAPI server information
             server = VideoVerifier._comfy_api._get_best_server()
             if not server:
                 bt.logging.error("Unable to get ComfyUI server information")
-                return None, {"error": "Failed to get ComfyUI server info"}
+                return 0.0, {"error": "Failed to get ComfyUI server info"}
 
             # Build complete URL
             host = server["host"]
@@ -121,7 +114,7 @@ class VideoVerifier:
                 bt.logging.error(
                     f"Unable to download validator-generated video: {validator_output_url}"
                 )
-                return None, {"error": "Failed to download validator video"}
+                return 0.0, {"error": "Failed to download validator video"}
 
             # 2. Get miner video path from video manager
             miner_video_path = self.validator.video_manager.get_video_cache_paths(
@@ -386,7 +379,7 @@ class VideoVerifier:
                 # Calculate runtime score component
                 runtime_upper_limit = min(base_runtime * 2, completion_time)
                 diff_runtime = base_runtime - runtime_upper_limit
-                runtime_scale = diff_runtime / 10
+                runtime_scale = max(-1, min(1, diff_runtime / 100))
                 runtime_score = runtime_scale
 
                 metrics["completion_time"] = completion_time

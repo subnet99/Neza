@@ -344,13 +344,12 @@ class MinerScoreManager:
         # Find UID through hotkey
         uid = self.hotkey_to_uid.get(hotkey)
         if uid is not None:
-            self.add_score(uid, score)
-            # Handle None score for logging
             score_str = f"{score:.4f}" if score is not None else "None"
             bt.logging.debug(
-                f"Record score {score_str} hotkey: {hotkey[:10]}... Task {task_id} UID: {uid}"
+                f"Recording score {score_str} for hotkey: {hotkey[:10]}... Task {task_id} UID: {uid}"
             )
 
+            self.add_score(uid, score)
             # Always save cache after recording a score
             self.save_cache()
         else:
@@ -366,10 +365,11 @@ class MinerScoreManager:
                         f"Found matching hotkey in miner_hotkeys for UID {uid}"
                     )
                     self.hotkey_to_uid[hotkey] = uid
-                    self.add_score(uid, score)
+                    score_str = f"{score:.4f}" if score is not None else "None"
                     bt.logging.info(
-                        f"Added score {score} for UID {uid} after fixing mapping"
+                        f"Adding score {score_str} for UID {uid} after fixing mapping"
                     )
+                    self.add_score(uid, score)
 
                     # Always save cache after recording a score
                     self.save_cache()
@@ -379,7 +379,7 @@ class MinerScoreManager:
                 f"Could not find matching UID for hotkey {hotkey} in any mapping"
             )
 
-    def add_score(self, uid, score):
+    def add_score(self, uid, score=0.0):
         """Add score to current cycle score records
 
         Args:

@@ -436,43 +436,23 @@ class MinerManager:
         if count == 0:
             return []
 
-        # Check if random selection is enabled in config
-        use_random = self.validator.validator_config.miner_selection.get(
-            "use_random_selection", True
+        # Use density-based selection
+        miners_with_density = await self._calculate_miners_density(miners_with_capacity)
+
+        # Sort miners by density (descending) to prioritize miners with higher density
+        sorted_miners = sorted(
+            miners_with_density, key=lambda m: m.get("density", 0), reverse=True
         )
 
-        if use_random:
-            # Use random selection
-            selected_miners = await self._select_miners_randomly(
-                miners_with_capacity, count
-            )
+        # Select top miners
+        selected_miners = sorted_miners[:count]
 
-            # Format selected miners for logging
-            formatted_miners = self._format_selected_miners_random(selected_miners)
+        # Format selected miners for logging
+        formatted_miners = self._format_selected_miners(selected_miners, count)
 
-            bt.logging.info(
-                f"Selected {len(selected_miners)} miners for tasks (randomly): {formatted_miners}"
-            )
-        else:
-            # Use density-based selection
-            miners_with_density = await self._calculate_miners_density(
-                miners_with_capacity
-            )
-
-            # Sort miners by density (descending) to prioritize miners with higher density
-            sorted_miners = sorted(
-                miners_with_density, key=lambda m: m.get("density", 0), reverse=True
-            )
-
-            # Select top miners
-            selected_miners = sorted_miners[:count]
-
-            # Format selected miners for logging
-            formatted_miners = self._format_selected_miners(selected_miners, count)
-
-            bt.logging.info(
-                f"Selected {len(selected_miners)} miners for tasks (density-based): {formatted_miners}"
-            )
+        bt.logging.info(
+            f"Selected {len(selected_miners)} miners for tasks (density-based): {formatted_miners}"
+        )
 
         return selected_miners
 

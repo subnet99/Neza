@@ -60,10 +60,6 @@ class VideoMiner(BaseMinerNeuron):
             forward_fn=self.forward_video_task,
         )
 
-        self.axon.attach(
-            forward_fn=self.forward_task_status_check,
-        )
-
         bt.logging.info("Video Miner initialized and ready to process tasks")
 
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
@@ -162,43 +158,6 @@ class VideoMiner(BaseMinerNeuron):
             )
             synapse.status_code = 400
             synapse.error = "Missing task_id or workflow_params"
-            return synapse
-
-    async def forward_task_status_check(
-        self, synapse: TaskStatusCheck
-    ) -> TaskStatusCheck:
-        """Handle task status check requests"""
-        # Check IP blacklist
-        is_blacklisted, reason = await self.blacklist(synapse)
-        if is_blacklisted:
-            bt.logging.warning(f"Status check from blacklisted source: {reason}")
-            synapse.status = "error"
-            synapse.error_message = f"Request rejected: {reason}"
-            return synapse
-
-        if synapse.task_id:
-            with self.task_lock:
-                if synapse.task_id not in self.tasks:
-                    bt.logging.warning(f"Task {synapse.task_id} not found")
-                    synapse.status = "not_found"
-                    return synapse
-
-                task = self.tasks[synapse.task_id]
-                if task["secret_key"] != synapse.secret_key:
-                    bt.logging.warning(f"Unauthorized access to task {synapse.task_id}")
-                    synapse.status = "unauthorized"
-                    return synapse
-
-                # Set response
-                synapse.status = task["status"]
-                synapse.progress = task["progress"]
-                synapse.estimated_time = task["estimated_time"]
-                synapse.error_message = task["error_message"]
-
-            return synapse
-        else:
-            synapse.status = "error"
-            synapse.error_message = "Missing task_id"
             return synapse
 
     async def blacklist(self, synapse: bt.Synapse) -> typing.Tuple[bool, str]:

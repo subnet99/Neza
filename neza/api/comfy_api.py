@@ -1,20 +1,19 @@
-import json
-import os
 import time
+import json
 import uuid
-import threading
-from typing import Any, Dict, List, Optional, Tuple, Callable
-import bittensor as bt
-import requests
-from websocket import (
-    WebSocket,
-    WebSocketTimeoutException,
-    WebSocketConnectionClosedException,
-)
+import os
 import traceback
+import threading
+import requests
+import bittensor as bt
+from typing import List, Dict, Any, Tuple, Optional
 
 
 class ComfyAPI:
+    """
+    ComfyUI API wrapper class
+    """
+
     def __init__(self, servers: List[Dict[str, str]] = None):
         """
         Initialize ComfyAPI class
@@ -51,20 +50,15 @@ class ComfyAPI:
                     "host": host,
                     "port": port,
                     "client_id": str(uuid.uuid4()),
-                    "ws": None,
-                    "ws_lock": threading.Lock(),
-                    "connected": False,
-                    "task_callbacks": {},  # Task callback dictionary, prompt_id -> callback
-                    "ws_thread": None,  # WebSocket listener thread
                     "task_results": {},  # Task result dictionary, prompt_id -> result
-                    "task_events": {},  # Task event dictionary, prompt_id -> event
+                    "available": False,  # Whether server is available
                 }
             )
         bt.logging.info(f"ComfyUI servers: {self.servers}")
-        # Connect WebSocket for all servers
+
+        # Check if ComfyUI servers are available
         for server in self.servers:
-            self._connect_websocket(server)
-            self._start_ws_listener(server)  # Start WebSocket listener thread
+            self._check_server_availability(server)
 
     @staticmethod
     def _parse_env_servers() -> List[Dict[str, str]]:
@@ -99,86 +93,39 @@ class ComfyAPI:
 
         return servers
 
-    def _connect_websocket(self, server: Dict[str, Any]) -> bool:
+    def _check_server_availability(self, server: Dict[str, Any]) -> None:
         """
-        Connect to WebSocket
-
-        Args:
-            server: Server configuration
-
-        Returns:
-            bool: Whether connection was successful
+        Check if a ComfyUI server is available by attempting to connect to its queue API endpoint.
         """
         try:
-            ws = WebSocket()
-            ws.connect(
-                f"ws://{server['host']}:{server['port']}/ws?clientId={server['client_id']}"
+            host_for_http = server["host"]
+            if not host_for_http.startswith(("http://", "https://")):
+                host_for_http = f"http://{host_for_http}"
+
+            # Add timeout setting
+            response = requests.get(
+                f"{host_for_http}:{server['port']}/queue", timeout=10
             )
-            # Set a reasonable timeout
-            ws.settimeout(60)
-            server["ws"] = ws
-            server["connected"] = True
-            print(f"Connected to ComfyUI server at {server['host']}:{server['port']}")
-            return True
+            if response.status_code == 200:
+                bt.logging.info(
+                    f"ComfyUI server {host_for_http}:{server['port']} is available."
+                )
+                server["available"] = True
+            else:
+                bt.logging.warning(
+                    f"ComfyUI server {host_for_http}:{server['port']} is not available. Status code: {response.status_code}"
+                )
+                server["available"] = False
+        except requests.exceptions.RequestException as e:
+            bt.logging.warning(
+                f"ComfyUI server {server['host']}:{server['port']} is not available due to network error: {str(e)}"
+            )
+            server["available"] = False
         except Exception as e:
-            print(
-                f"WebSocket connection failed for {server['host']}:{server['port']}: {str(e)}"
+            bt.logging.warning(
+                f"ComfyUI server {server['host']}:{server['port']} is not available due to an unexpected error: {str(e)}"
             )
-            server["connected"] = False
-            return False
-
-    def _start_ws_listener(self, server: Dict[str, Any]) -> None:
-        """
-        Start WebSocket listener thread to handle all messages from the server
-
-        Args:
-            server: Server configuration
-        """
-
-        def ws_listener():
-            while server["connected"]:
-                try:
-                    if server["ws"] is None:
-                        time.sleep(1)
-                        continue
-
-                    message = server["ws"].recv()
-                    data = json.loads(message)
-
-                    # Handle execution completion messages
-                    if data["type"] == "executing":
-                        if data["data"]["node"] is None:
-                            # Try to get history records
-                            prompt_id = data.get("data", {}).get("prompt_id")
-                            if prompt_id and prompt_id in server["task_callbacks"]:
-                                # Get video filename
-                                history_result = self.get_history(server, prompt_id)
-                                if history_result:
-                                    # Save result and trigger event
-                                    server["task_results"][prompt_id] = history_result[
-                                        0
-                                    ]
-                                    if prompt_id in server["task_events"]:
-                                        server["task_events"][prompt_id].set()
-
-                except WebSocketTimeoutException:
-                    # Timeout, continue listening
-                    continue
-                except WebSocketConnectionClosedException:
-                    # Connection closed, try to reconnect
-                    print(
-                        f"WebSocket connection closed for {server['host']}:{server['port']}"
-                    )
-                    server["connected"] = False
-                    time.sleep(5)
-                    self._connect_websocket(server)
-                except Exception as e:
-                    print(f"WebSocket listener error: {str(e)}")
-                    time.sleep(1)
-
-        # Create and start thread
-        server["ws_thread"] = threading.Thread(target=ws_listener, daemon=True)
-        server["ws_thread"].start()
+            server["available"] = False
 
     def _get_server_load(self, server: Dict[str, Any]) -> float:
         """
@@ -242,14 +189,12 @@ class ComfyAPI:
         best_server = None
 
         for server in self.servers:
-            # If server is not connected, try to reconnect
-            if not server["connected"]:
-                self._connect_websocket(server)
-                if server["connected"] and server["ws_thread"] is None:
-                    self._start_ws_listener(server)
+            # If server is not available, try to check availability again
+            if not server["available"]:
+                self._check_server_availability(server)
 
-            # If server is connected, check load
-            if server["connected"]:
+            # If server is available, check load
+            if server["available"]:
                 load = self._get_server_load(server)
                 if load < min_load:
                     min_load = load
@@ -258,54 +203,84 @@ class ComfyAPI:
         return best_server
 
     def get_video(
-        self, server: Dict[str, Any], prompt_id: str, timeout: int = 300
+        self, server: Dict[str, Any], prompt_id: str, timeout: int = 1800
     ) -> str:
         """
-        Get video generation result using event waiting instead of blocking WebSocket
+        Get video generation result using periodic polling of history instead of WebSocket events
 
         Args:
             server: Server configuration
             prompt_id: Prompt ID
-            timeout: Timeout in seconds
+            timeout: Timeout in seconds (default 1800s = 30min)
 
         Returns:
             str: Video filename, empty string if failed
         """
-        try:
-            # If result is already in task_results, return it directly
-            if prompt_id in server["task_results"]:
-                return server["task_results"][prompt_id]
+        # If result is already in task_results, return it directly
+        if prompt_id in server["task_results"]:
+            bt.logging.debug(f"Found video result in cache for prompt_id: {prompt_id}")
+            return server["task_results"][prompt_id]
 
-            # Create event and set callback
-            if prompt_id not in server["task_events"]:
-                server["task_events"][prompt_id] = threading.Event()
+        # Calculate number of polling attempts based on timeout
+        # Poll every 30 seconds, with a maximum of 60 attempts (30 minutes)
+        poll_interval = 30  # seconds
+        max_attempts = min(60, max(1, int(timeout / poll_interval)))
 
-            # Wait for event or timeout
-            if server["task_events"][prompt_id].wait(timeout):
-                # Event triggered, return result
-                if prompt_id in server["task_results"]:
-                    return server["task_results"][prompt_id]
+        bt.logging.info(
+            f"Starting polling for result of prompt_id: {prompt_id}, will check every {poll_interval}s for up to {max_attempts} times"
+        )
 
-            # If timeout, try to get from history
-            history_result = self.get_history(server, prompt_id)
-            if history_result:
-                server["task_results"][prompt_id] = history_result[0]
-                return history_result[0]
-
-            print(
-                f"Timeout waiting for video result from {server['host']}:{server['port']}"
-            )
-            return ""
-
-        except Exception as e:
-            print(f"Error getting video: {str(e)}")
+        # Poll history at regular intervals
+        for attempt in range(max_attempts):
             try:
+                # Sleep first to give time for the task to start processing
+                if attempt > 0:  # Don't sleep on first attempt
+                    bt.logging.debug(
+                        f"Polling attempt {attempt+1}/{max_attempts} for prompt_id: {prompt_id}"
+                    )
+                    time.sleep(poll_interval)
+
+                # Get history
                 history_result = self.get_history(server, prompt_id)
                 if history_result:
+                    bt.logging.info(
+                        f"Found result in history for prompt_id: {prompt_id} on attempt {attempt+1}/{max_attempts}"
+                    )
+                    server["task_results"][prompt_id] = history_result[0]
                     return history_result[0]
-            except:
-                pass
-            return ""
+
+                # Check if server is available
+                if not server["available"]:
+                    bt.logging.warning(
+                        f"Server {server['host']}:{server['port']} not available, checking availability"
+                    )
+                    self._check_server_availability(server)
+
+            except Exception as e:
+                bt.logging.error(f"Error during polling attempt {attempt+1}: {str(e)}")
+                # Continue polling despite errors
+
+        # If we get here, all polling attempts failed
+        bt.logging.error(
+            f"Failed to get video result for prompt_id: {prompt_id} after {max_attempts} polling attempts"
+        )
+
+        # Final attempt to get history
+        try:
+            bt.logging.info(
+                f"Making final attempt to get history for prompt_id: {prompt_id}"
+            )
+            history_result = self.get_history(server, prompt_id)
+            if history_result:
+                bt.logging.info(
+                    f"Found result in history on final attempt for prompt_id: {prompt_id}"
+                )
+                server["task_results"][prompt_id] = history_result[0]
+                return history_result[0]
+        except Exception as e:
+            bt.logging.error(f"Error in final history check: {str(e)}")
+
+        return ""
 
     def get_history(self, server: Dict[str, Any], prompt_id: str) -> List[str]:
         """
@@ -363,8 +338,20 @@ class ComfyAPI:
         # Get server with lowest load
         server = self._get_best_server()
         if server is None:
-            print("No available ComfyUI servers")
+            bt.logging.error("No available ComfyUI servers")
             return False, "", None
+
+        # Double-check server availability
+        if not server["available"]:
+            bt.logging.warning(
+                f"Server {server['host']}:{server['port']} not available, checking availability"
+            )
+            self._check_server_availability(server)
+            if not server["available"]:
+                bt.logging.error(
+                    f"Server {server['host']}:{server['port']} is still not available"
+                )
+                return False, "", None
 
         try:
             # Ensure host doesn't include protocol prefix for HTTP requests
@@ -372,8 +359,15 @@ class ComfyAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            # Log task information
+            task_log = f"task_id: {task_id}" if task_id else "no task_id"
+            bt.logging.info(
+                f"Executing ComfyUI workflow ({task_log}) on server {host_for_http}:{server['port']}"
+            )
+
             # Add timeout setting
             try:
+                start_time = time.time()
                 response = requests.post(
                     f"{host_for_http}:{server['port']}/prompt",
                     json={
@@ -384,49 +378,75 @@ class ComfyAPI:
                 )
 
                 if response.status_code != 200:
-                    print(f"Workflow: {workflow}")
-                    print(
+                    bt.logging.error(
                         f"ComfyUI server {host_for_http}:{server['port']} returned error status code: {response.status_code}"
                     )
-                    print(f"Response content: {response.text}")
+                    bt.logging.error(f"Response content: {response.text}")
+                    # Mark server as unavailable if it returns an error
+                    server["available"] = False
                     return False, "", None
 
                 response_json = response.json()
                 if "prompt_id" not in response_json:
-                    print(f"Missing prompt_id in ComfyUI response: {response_json}")
+                    bt.logging.error(
+                        f"Missing prompt_id in ComfyUI response: {response_json}"
+                    )
                     return False, "", None
 
                 prompt_id = response_json["prompt_id"]
+                bt.logging.info(
+                    f"Workflow submitted successfully, prompt_id: {prompt_id}"
+                )
+
             except requests.exceptions.RequestException as e:
-                print(f"Error sending request to ComfyUI server: {str(e)}")
+                bt.logging.error(f"Error sending request to ComfyUI server: {str(e)}")
+                # Mark server as unavailable if there's a connection error
+                server["available"] = False
                 return False, "", None
             except json.JSONDecodeError as e:
-                print(f"Error parsing ComfyUI response: {str(e)}")
-                print(f"Response content: {response.text}")
+                bt.logging.error(f"Error parsing ComfyUI response: {str(e)}")
+                bt.logging.error(f"Response content: {response.text}")
                 return False, "", None
 
-            # Get video result
+            # Get video result using polling
+            bt.logging.info(f"Waiting for video result, prompt_id: {prompt_id}")
             video_result = self.get_video(server, prompt_id)
+
             if not video_result:
-                print(
+                bt.logging.error(
                     f"Failed to get video result from ComfyUI, prompt_id: {prompt_id}"
                 )
-                # Try to get from history again
+                # Try to get from history one more time with increased timeout
+                bt.logging.info("Making final attempt to get result from history")
                 history_result = self.get_history(server, prompt_id)
                 if history_result:
+                    elapsed_time = time.time() - start_time
+                    bt.logging.info(
+                        f"Found result in history on final attempt, prompt_id: {prompt_id}, elapsed time: {elapsed_time:.2f}s"
+                    )
                     # Return server info
                     server_info = {"host": server["host"], "port": server["port"]}
                     return True, history_result[0], server_info
 
+                elapsed_time = time.time() - start_time
+                bt.logging.error(
+                    f"Workflow execution failed after {elapsed_time:.2f}s, prompt_id: {prompt_id}"
+                )
                 return False, "", None
+
+            # Success
+            elapsed_time = time.time() - start_time
+            bt.logging.info(
+                f"Workflow execution completed successfully in {elapsed_time:.2f}s, prompt_id: {prompt_id}"
+            )
 
             # Return server info
             server_info = {"host": server["host"], "port": server["port"]}
             return True, video_result, server_info
 
         except Exception as e:
-            print(f"Error executing ComfyUI workflow: {str(e)}")
-            print(traceback.format_exc())
+            bt.logging.error(f"Error executing ComfyUI workflow: {str(e)}")
+            bt.logging.error(traceback.format_exc())
             return False, "", None
 
     def execute_workflow(
