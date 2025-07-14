@@ -1006,12 +1006,6 @@ class TaskManager:
                             file_info=file_info,
                         )
 
-                        # Add to verification queue
-                        if self.validator.verification_manager:
-                            self.validator.verification_manager.add_verification_task(
-                                {"task_id": task_id, "miner_hotkey": miner_hotkey}
-                            )
-
                         completed_count += 1
                     else:
                         # File not available, still processing
