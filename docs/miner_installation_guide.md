@@ -89,11 +89,28 @@ COMFYUI_SERVERS=127.0.0.1:8188
 
 ## Miner Startup Command
 
+Mainnet
+
 ```bash
-python3 neurons/miner.py \
+pm2 start neurons/miner.py -- \
   --netuid 99 \
+  --subtensor.network finney \
   --wallet.name [wallet_name] \
   --wallet.hotkey [hotkey] \
-  --subtensor.network [network_name] \
+  --axon.port {port} \
+  --axon.external_ip {ip} \
+  --logging.trace
+```
+
+Testnet
+
+```bash
+pm2 start neurons/miner.py -- \
+  --netuid 377 \
+  --subtensor.network test \
+  --wallet.name [wallet_name] \
+  --wallet.hotkey [hotkey] \
+  --axon.port {port} \
+  --axon.external_ip {ip} \
   --logging.trace
 ```

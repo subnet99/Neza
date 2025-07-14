@@ -47,8 +47,6 @@ class VideoMiner(BaseMinerNeuron):
 
         # IP blacklist
         self.ip_blacklist = [
-            "192.168.1.100",  # Example IP
-            "10.0.0.50",  # Example IP
         ]
 
         # Start task processing thread
@@ -92,7 +90,8 @@ class VideoMiner(BaseMinerNeuron):
 
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
         stake = self.metagraph.S[uid].item()
-        if stake < 10000:
+        network = self.config.subtensor.network
+        if network != 'test' and stake < 10000:
             bt.logging.warning(
                 f"Blacklisting request from {synapse.dendrite.hotkey} [uid={uid}], not enough stake -- {stake}"
             )
