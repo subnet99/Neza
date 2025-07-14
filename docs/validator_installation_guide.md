@@ -1,14 +1,5 @@
 # Neza Subnet Installation Guide
 
-## Table of Contents
-
-1. [Environment Requirements](#environment-requirements)
-2. [Installation Steps](#installation-steps)
-   - [Pre-installation Setup](#pre-installation-setup)
-   - [Required on Single Machine](#required-on-single-machine)
-3. [Set Environment Variables](#set-environment-variables)
-4. [Validator Startup Command](#validator-startup-command)
-
 ## Environment Requirements
 
 Before starting the installation, please ensure your system meets the following requirements:
@@ -20,13 +11,9 @@ Before starting the installation, please ensure your system meets the following 
 - NVIDIA driver version > 525
 - Meet the [hardware requirements](../README.md#validator-recommended-configuration)
 
-## Installation Steps
+## Installation
 
-### Pre-installation Setup
-
-The following components can be installed on separate machines and can be completed before the main validator setup:
-
-#### Install ComfyUI (Pre-installation)
+### Install ComfyUI
 
 ComfyUI can be installed on separate GPU servers and prepared in advance:
 
@@ -49,7 +36,7 @@ chmod +x ./scripts/setup_comfyui.sh
 
 **Note**: You can run multiple ComfyUI instances on different GPU servers and configure them in the environment variables.
 
-#### Install PostgreSQL Database (Pre-installation)
+### Install PostgreSQL
 
 PostgreSQL can be installed on a separate database server and prepared in advance:
 
@@ -76,13 +63,9 @@ EOF
 
 **Note**: If PostgreSQL is installed on a separate server, update the `DB_HOST` in your environment variables to point to the database server's IP address.
 
-### Required on Single Machine
+### Install FFmpeg
 
-The following components must be installed on the same machine as the validator (cannot be distributed):
-
-#### Install FFmpeg (MUST be on the same server as Python validator)
-
-FFmpeg is required for video processing and MUST be installed on the same server where the Python validator will run:
+It MUST be installed on the server where this repository resides, since the Python validator code requires FFmpeg. Don't install on other server.
 
 ```bash
 # Update package lists
@@ -95,7 +78,7 @@ sudo apt install -y ffmpeg
 ffmpeg -version
 ```
 
-#### Clone Repository
+### Clone Repository
 
 ```bash
 git clone https://github.com/subnet99/Neza.git
@@ -123,7 +106,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Set Environment Variables
+#### Set Environment Variables
 
 1. Create a configuration file:
 
@@ -149,7 +132,8 @@ DB_PORT=5432
 # Format: IP1:PORT1,IP2:PORT2,IP3:PORT3
 COMFYUI_SERVERS=127.0.0.1:8188
 
-# Weights & Biases
+# Weights & Biases(Optional)
+# Highly recommended to fill in so that the scoring details can be published
 WANDB_API_KEY=
 ```
 

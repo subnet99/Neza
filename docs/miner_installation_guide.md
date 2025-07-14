@@ -1,14 +1,5 @@
 # Miner Installation Guide
 
-## Table of Contents
-
-1. [Environment Requirements](#environment-requirements)
-2. [Installation Steps](#installation-steps)
-   - [Pre-installation Setup](#pre-installation-setup)
-   - [Required on Single Machine](#required-on-single-machine)
-3. [Set Environment Variables](#set-environment-variables)
-4. [Miner Startup Command](#miner-startup-command)
-
 ## Environment Requirements
 
 Before starting the installation, please ensure your system meets the following requirements:
@@ -19,13 +10,9 @@ Before starting the installation, please ensure your system meets the following 
 - NVIDIA driver version > 525
 - Meet the [hardware requirements](../README.md#miner-recommended-configuration)
 
-## Installation Steps
+## Installation
 
-### Pre-installation Setup
-
-The following components can be installed on separate machines and can be completed before the main miner setup:
-
-#### Install ComfyUI (Pre-installation)
+### Install ComfyUI
 
 ComfyUI can be installed on separate GPU servers and prepared in advance:
 
@@ -48,11 +35,7 @@ chmod +x ./scripts/setup_comfyui.sh
 
 **Note**: You can run multiple ComfyUI instances on different GPU servers and configure them in the environment variables.
 
-### Required on Single Machine
-
-The following components must be installed on the same machine as the miner (cannot be distributed):
-
-#### Clone Repository
+### Clone Repository
 
 ```bash
 git clone https://github.com/subnet99/Neza.git
@@ -80,7 +63,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Set Environment Variables
+#### Set Environment Variables
 
 1. Create a configuration file:
 
