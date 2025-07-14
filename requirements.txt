@@ -1,6 +1,6 @@
 bittensor>=9.8.0
 torch>=2.2.0
-wandb>=0.17.0
+wandb>=0.21.0
 numpy>=2.2.0
 psycopg2-binary>=2.9.0
 python-dotenv>=1.1.0
@@ -10,4 +10,3 @@ substrate-interface>=1.7.0
 ffmpeg-python>=0.2.0
 imagebind @ git+https://github.com/subnet99/ImageBind.git@434df4ec77c76f40c0d1065dc5ece98abbcdb5d8
 eva-decord>=0.6.0
-wandb>=0.21.0
