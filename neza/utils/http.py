@@ -217,11 +217,11 @@ async def request_upload_url(validator_wallet, task_id=None):
         # Generate signature message
         exclude_fields = ["validator_signature"]
         message = generate_signature_message(body, exclude_fields)
-        bt.logging.debug(f"Generated signature message: {message}")
+        # bt.logging.debug(f"Generated signature message: {message}")
 
         # Sign with wallet
         signature = validator_wallet.hotkey.sign(message.encode()).hex()
-        bt.logging.debug(f"Generated signature: {signature}")
+        # bt.logging.debug(f"Generated signature: {signature}")
 
         # Add signature to request body
         body["validator_signature"] = signature
@@ -230,7 +230,7 @@ async def request_upload_url(validator_wallet, task_id=None):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
         bt.logging.info(f"Requesting upload URL: {api_url}")
-        bt.logging.debug(f"Request body: {body}")
+        # bt.logging.debug(f"Request body: {body}")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -238,7 +238,7 @@ async def request_upload_url(validator_wallet, task_id=None):
             ) as response:
                 if response.status == 200:
                     result = await response.json()
-                    bt.logging.info(f"Successfully obtained upload URL: {result}")
+                    bt.logging.info(f"Successfully obtained upload URL")
                     return result
                 else:
                     error_text = await response.text()
@@ -321,7 +321,7 @@ async def upload_task_result(
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
         bt.logging.info(f"Uploading task result: {api_url}")
-        bt.logging.debug(f"Request body: {body}")
+        # bt.logging.debug(f"Request body: {body}")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(

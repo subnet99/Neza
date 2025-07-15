@@ -785,7 +785,7 @@ class TaskManager:
                 preview_url = upload_info.get("preview_url") if upload_info else ""
 
                 if upload_url:
-                    bt.logging.info(f"Got upload URL: {upload_url[:30]}...")
+                    bt.logging.info(f"Got upload URL success")
                 else:
                     bt.logging.warning(f"No upload URL received for task {task_id}")
             except Exception as e:
