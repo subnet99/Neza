@@ -165,6 +165,24 @@ class BaseValidatorNeuron(BaseNeuron):
             while True:
                 bt.logging.info(f"step({self.step}) block({self.block})")
 
+                # Check if the substrate thread is still alive
+                if (
+                    hasattr(self, "substrate_thread")
+                    and self.substrate_thread
+                    and not self.substrate_thread.is_alive()
+                ):
+                    bt.logging.info(
+                        "Restarting substrate interface due to killed connection"
+                    )
+                    try:
+                        self._initialize_block_subscription()
+                        bt.logging.info("Substrate interface restarted successfully")
+                    except Exception as e:
+                        bt.logging.error(
+                            f"Failed to restart substrate interface: {str(e)}"
+                        )
+                        bt.logging.error(traceback.format_exc())
+
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
 

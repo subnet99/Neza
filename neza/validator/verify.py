@@ -81,8 +81,8 @@ class VideoVerifier:
                 )
 
             # Execute workflow to get filename and validator execution time
-            output_filename, validator_execution_time = self.run_comfy_workflow(
-                complete_workflow
+            output_filename, validator_execution_time, server_info = (
+                self.run_comfy_workflow(complete_workflow)
             )
 
             if not output_filename:
@@ -90,15 +90,14 @@ class VideoVerifier:
                 return 0.0, {"error": "Failed to generate verification video"}
 
             # Convert filename to complete URL path
-            # Get ComfyAPI server information
-            server = VideoVerifier._comfy_api._get_best_server()
-            if not server:
+            # Get ComfyAPI server
+            if not server_info:
                 bt.logging.error("Unable to get ComfyUI server information")
                 return 0.0, {"error": "Failed to get ComfyUI server info"}
 
             # Build complete URL
-            host = server["host"]
-            port = server["port"]
+            host = server_info["host"]
+            port = server_info["port"]
             validator_output_url = (
                 f"http://{host}:{port}/view?filename={output_filename}&type=output"
             )
@@ -161,7 +160,8 @@ class VideoVerifier:
             complete_workflow: Complete workflow configuration
 
         Returns:
-            tuple: (output_filename, execution_time) where output_filename is the generated file and execution_time is in seconds
+            tuple: (output_filename, execution_time, server_info) where output_filename is the generated file,
+                  execution_time is in seconds, and server_info contains host and port information
         """
         try:
             bt.logging.info("Executing ComfyUI workflow")
@@ -232,7 +232,7 @@ class VideoVerifier:
                         f"Used ComfyUI server: {server_info.get('host')}:{server_info.get('port')}"
                     )
 
-                return None, execution_time
+                return None, execution_time, None
 
             bt.logging.info(
                 f"ComfyUI workflow executed successfully, output: {output_filename}"
@@ -263,12 +263,12 @@ class VideoVerifier:
                         f"Could not verify output file accessibility: {str(e)}"
                     )
 
-            return output_filename, execution_time
+            return output_filename, execution_time, server_info
 
         except Exception as e:
             bt.logging.error(f"Error executing ComfyUI workflow: {str(e)}")
             bt.logging.error(traceback.format_exc())
-            return None, 0
+            return None, 0, None
 
     def verify_videos(
         self,
@@ -358,8 +358,8 @@ class VideoVerifier:
             }
 
             # Set weights for score calculation
-            video_score_weight = 0.4
-            audio_score_weight = 0.4
+            video_score_weight = 0.6
+            audio_score_weight = 0.2
             runtime_weight = 0.2
 
             # Process completion time if provided
