@@ -46,8 +46,7 @@ class VideoMiner(BaseMinerNeuron):
         self.tasks = {}  # task_id -> task_info
 
         # IP blacklist
-        self.ip_blacklist = [
-        ]
+        self.ip_blacklist = []
 
         # Start task processing thread
         self.task_processor_thread = threading.Thread(
@@ -87,7 +86,7 @@ class VideoMiner(BaseMinerNeuron):
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
         stake = self.metagraph.S[uid].item()
         network = self.config.subtensor.network
-        if network != 'test' and stake < 10000:
+        if network != "test" and stake < 10000:
             bt.logging.warning(
                 f"Blacklisting request from {synapse.dendrite.hotkey} [uid={uid}], not enough stake -- {stake}"
             )
@@ -324,9 +323,7 @@ class VideoMiner(BaseMinerNeuron):
 
             # If there's a custom upload URL, upload video to specified URL
             if has_custom_upload and upload_url:
-                bt.logging.info(
-                    f"Uploading video to custom URL for task {task_id}: {upload_url[:30]}..."
-                )
+                bt.logging.info(f"Uploading video to custom URL for task {task_id}...")
 
                 # Maximum retry count
                 max_retries = 3
@@ -355,9 +352,7 @@ class VideoMiner(BaseMinerNeuron):
                             f"{comfy_url}/view?filename={filename}&type=output"
                         )
 
-                        bt.logging.info(
-                            f"Downloading video from ComfyUI: {video_download_url}"
-                        )
+                        bt.logging.info(f"Downloading video from ComfyUI")
 
                         # Increase timeout setting when downloading videos
                         video_data, status_code = http_get_request_sync(

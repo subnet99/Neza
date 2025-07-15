@@ -448,31 +448,27 @@ class MinerScoreManager:
             if not scores:
                 continue
 
-            # If we have more than 3 scores, keep only the 3 most recent ones
-            if len(scores) > 3:
-                # Calculate average score for scores to move
-                scores_to_move = scores[:-3]  # All except the last 3
-                avg_score = self.safe_mean_score(scores_to_move)
+            # Calculate average of all current scores
+            avg_score = self.safe_mean_score(scores)
 
-                # Add to historical records
-                if uid not in self.historical_scores:
-                    self.historical_scores[uid] = []
+            # Add average score to historical records
+            if uid not in self.historical_scores:
+                self.historical_scores[uid] = []
 
-                self.historical_scores[uid].append(avg_score)
+            self.historical_scores[uid].append(avg_score)
 
-                # Limit historical records
-                if len(self.historical_scores[uid]) > self.max_history:
-                    self.historical_scores[uid] = self.historical_scores[uid][
-                        -self.max_history :
-                    ]
+            # Limit historical records
+            if len(self.historical_scores[uid]) > self.max_history:
+                self.historical_scores[uid] = self.historical_scores[uid][
+                    -self.max_history :
+                ]
 
-                # Keep only the 3 most recent scores
-                self.current_scores[uid] = scores[-3:]
+            # Use the average score as the initial score for the next cycle
+            self.current_scores[uid] = [avg_score]
 
-                bt.logging.debug(
-                    f"UID {uid}: Moved {len(scores_to_move)} scores to history, keeping {len(self.current_scores[uid])} recent scores"
-                )
-            # If we have 3 or fewer scores, do nothing (keep them all)
+            bt.logging.debug(
+                f"UID {uid}: Calculated average score {avg_score:.4f} added to history and set as initial score for next cycle"
+            )
 
         # Limit task scores
         for uid in self.task_scores:

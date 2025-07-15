@@ -67,7 +67,7 @@ class ValidatorConfig:
 
         # Score management configuration
         self.score_management = {
-            "history_move_blocks": 600,  # Move scores to history every 600 blocks (approx 2 hours)
+            "history_move_blocks": 6000,  # Move scores to history every 6000 blocks (approx 20 hours)
         }
 
         # Score manager configuration
@@ -76,7 +76,7 @@ class ValidatorConfig:
             "min_cache_version": 1,  # Minimum compatible cache version
             "history_weight": 0.4,  # Weight for historical scores
             "current_weight": 0.6,  # Weight for current scores
-            "max_history": 10,  # Maximum number of historical scores to keep
+            "max_history": 6,  # Maximum number of historical scores to keep
             "sliding_window": 30,  # Sliding window size for task scores
             "always_save_cache": True,  # Whether to always save cache
         }
