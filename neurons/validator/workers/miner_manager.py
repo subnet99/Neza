@@ -84,9 +84,9 @@ class MinerManager:
                 # Add to database updates (will be processed later)
                 db_updates.append((hotkey, uid))
 
-                bt.logging.debug(
-                    f"Updated miner {uid} uid: {self.validator.metagraph.hotkeys[uid]}"
-                )
+                # bt.logging.debug(
+                #     f"Updated miner {uid} uid: {self.validator.metagraph.hotkeys[uid]}"
+                # )
 
             # Collect all miner hotkeys (including offline ones)
             for uid in range(len(metagraph.hotkeys)):
