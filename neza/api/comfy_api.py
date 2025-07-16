@@ -301,7 +301,7 @@ class ComfyAPI:
 
             # Add timeout setting
             response = requests.get(
-                f"{host_for_http}:{server['port']}/history/{prompt_id}", timeout=10
+                f"{host_for_http}:{server['port']}/history/{prompt_id}", timeout=60
             )
             if response.status_code == 200:
                 history = response.json()[prompt_id]
@@ -316,10 +316,10 @@ class ComfyAPI:
 
                 return filenames
             else:
-                print(f"Failed to get history: {response.status_code}")
+                bt.logging.info(f"Failed to get history: {response.status_code}")
                 return []
         except Exception as e:
-            print(f"Error getting history: {str(e)}")
+            bt.logging.error(f"Failed to get history: {str(e)}")
             return []
 
     def execute_comfy_workflow(
