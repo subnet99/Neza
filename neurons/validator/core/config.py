@@ -35,7 +35,7 @@ class ValidatorConfig:
 
         # Miner selection configuration
         self.miner_selection = {
-            "send_cycle_length": 144 * 60,  # send cycle length in seconds (144 minutes)
+            "send_cycle_length": 21600,  # send cycle length in seconds (6 h)
             "generate_max_tasks": 1,  # Maximum synthetic tasks
             "density_float_ratio": 0.003,  # Task density float ratio (0.3%)
         }
@@ -50,8 +50,7 @@ class ValidatorConfig:
             "random_verification_ratio": 0.7,  # Random verification allocation ratio
             "verification_batch_size": 50,  # Maximum tasks per batch
             "gpu_verification_timeout": 1000,  # GPU verification timeout in seconds
-            "verification_cycle_length": 144
-            * 60,  # Verification cycle length in seconds (144 minutes)
+            "verification_cycle_length": 21600,  # Verification cycle length in seconds (6 h)
             "min_verification_per_cycle": 1,  # Minimum verifications per miner per cycle
             "verification_time_estimate": 300,  # Estimated verification time (5 minutes)
         }

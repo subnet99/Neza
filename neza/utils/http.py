@@ -308,11 +308,11 @@ async def upload_task_result(
         # Generate signature message
         exclude_fields = ["validator_signature"]
         message = generate_signature_message(body, exclude_fields)
-        bt.logging.debug(f"Generated signature message: {message}")
+        # bt.logging.debug(f"Generated signature message: {message}")
 
         # Sign with wallet
         signature = validator_wallet.hotkey.sign(message.encode()).hex()
-        bt.logging.debug(f"Generated signature: {signature}")
+        # bt.logging.debug(f"Generated signature: {signature}")
 
         # Add signature to request body
         body["validator_signature"] = signature

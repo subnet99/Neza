@@ -149,7 +149,7 @@ class MinerManager:
         """Synchronously updates available miners list"""
         try:
             # Validator stake limit (validators with stake above this won't be selected as miners)
-            validator_stake_limit = 10000
+            validator_stake_limit = 1000
 
             available_miners = []
             hotkeys = []
@@ -161,10 +161,6 @@ class MinerManager:
                 # Skip self
                 if uid == self.validator.uid:
                     continue
-
-                bt.logging.info(
-                    f"Updating miner {uid} uid: {self.validator.metagraph.hotkeys[uid]}"
-                )
 
                 # Get node info
                 stake = self.validator.metagraph.S[uid].item()
@@ -206,6 +202,7 @@ class MinerManager:
                 available_miners.append(uid)
 
             # Update cache
+            random.shuffle(available_miners)
             self.available_miners_cache = available_miners
             self.miners_cache_time = time.time()
 
@@ -225,7 +222,7 @@ class MinerManager:
         """Asynchronously updates available miners list"""
         try:
             # Validator stake limit (validators with stake above this won't be selected as miners)
-            validator_stake_limit = 10000
+            validator_stake_limit = 1000
 
             available_miners = []
             hotkeys = []
@@ -237,10 +234,6 @@ class MinerManager:
                 # Skip self
                 if uid == self.validator.uid:
                     continue
-
-                bt.logging.info(
-                    f"Updating miner {uid} uid: {self.validator.metagraph.hotkeys[uid]}"
-                )
 
                 # Get node info
                 stake = self.validator.metagraph.S[uid].item()
@@ -282,6 +275,7 @@ class MinerManager:
                 available_miners.append(uid)
 
             # Update cache
+            random.shuffle(available_miners)
             self.available_miners_cache = available_miners
             self.miners_cache_time = time.time()
 

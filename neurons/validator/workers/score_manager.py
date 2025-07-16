@@ -308,11 +308,11 @@ class MinerScoreManager:
         # Update reverse mapping
         self.hotkey_to_uid = {hotkey: uid for uid, hotkey in self.miner_hotkeys.items()}
 
-        bt.logging.info(
-            f"Updated hotkey_to_uid mapping with {len(self.hotkey_to_uid)} entries"
-        )
-        bt.logging.debug(f"Current miner_hotkeys: {self.miner_hotkeys}")
-        bt.logging.debug(f"Current hotkey_to_uid mapping: {self.hotkey_to_uid}")
+        # bt.logging.info(
+        #     f"Updated hotkey_to_uid mapping with {len(self.hotkey_to_uid)} entries"
+        # )
+        # bt.logging.debug(f"Current miner_hotkeys: {self.miner_hotkeys}")
+        # bt.logging.debug(f"Current hotkey_to_uid mapping: {self.hotkey_to_uid}")
 
         return changed_uids
 
@@ -356,8 +356,8 @@ class MinerScoreManager:
             bt.logging.warning(
                 f"Unable to record score for hotkey {hotkey[:10]}... corresponding UID not found."
             )
-            bt.logging.warning(f"Current hotkey_to_uid mapping: {self.hotkey_to_uid}")
-            bt.logging.warning(f"Current miner_hotkeys: {self.miner_hotkeys}")
+            # bt.logging.warning(f"Current hotkey_to_uid mapping: {self.hotkey_to_uid}")
+            # bt.logging.warning(f"Current miner_hotkeys: {self.miner_hotkeys}")
 
             for uid, known_hotkey in self.miner_hotkeys.items():
                 if known_hotkey == hotkey:

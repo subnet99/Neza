@@ -54,9 +54,7 @@ class VideoManager:
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
         # Download video directly
-        bt.logging.info(
-            f"Downloading {video_type} video for task {task_id}: {video_url}"
-        )
+        bt.logging.info(f"Downloading {video_type} video for task {task_id}")
 
         loop = asyncio.get_event_loop()
         download_success = await loop.run_in_executor(
