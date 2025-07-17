@@ -440,8 +440,8 @@ class MinerScoreManager:
             current_component = task_avg * self.current_weight
             weights[uid] = history_component + current_component
 
-            if task_count < 3:
-                weights[uid] *= 0.1
+            if task_count < 2:
+                weights[uid] *= 0.5
 
         return weights
 
