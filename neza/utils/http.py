@@ -292,7 +292,7 @@ async def upload_task_result(
             "miner_hotkey": miner_hotkey,
             "model": "Wan 2.1",
             "resolution": "512 x 512",
-            "duration": 6,
+            "duration": 3,
             "processing_time": processing_time,
             "frame_rate": 23,
             "score": score,
