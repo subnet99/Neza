@@ -1195,9 +1195,16 @@ class TaskManager:
                 )
 
                 # Select task based on available capacity
-                fetch_capacity = min(max_capacity, max(1, int(max_capacity * 1.5)))
+                max_over_capacity = max(1, int(max_capacity * 0.5))
+                fetch_capacity = min(max_capacity, max_over_capacity - queue_size)
                 task_count = min(fetch_capacity, len(sorted_tasks))
-                task_count = max(1, task_count) if sorted_tasks else 0
+                task_count = max(0, task_count) if sorted_tasks else 0
+
+                if task_count == 0:
+                    bt.logging.info(
+                        f"No tasks to verify, skipping verification, max_over_capacity: {max_over_capacity}, queue_size: {queue_size}"
+                    )
+                    return
 
                 # Select task
                 selected_tasks = sorted_tasks[:task_count]

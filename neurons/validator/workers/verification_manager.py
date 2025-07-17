@@ -3,6 +3,7 @@ import threading
 import asyncio
 import traceback
 import json
+import queue
 from neza.utils.http import upload_task_result
 
 import bittensor as bt
@@ -23,7 +24,7 @@ class VerificationManager:
         self.validator = validator
 
         # Verification queue and task tracking
-        self.verification_queue = None
+        self.verification_queue = queue.Queue()
         self.verifying_tasks = set()  # Set of task IDs currently being verified
         self.verification_workers = []  # List of verification worker tasks
 
@@ -41,94 +42,212 @@ class VerificationManager:
 
     def _start_verification_workers(self):
         """
-        Starts verification worker threads
-        Creates specified number of async verification worker tasks
+        Starts verification worker threads with independent event loops for true parallelism.
+        Each worker runs in its own thread with its own event loop, allowing workers to operate
+        independently even if one worker is blocked.
         """
+        worker_count = self.validator.validator_config.verification[
+            "max_concurrent_verifications"
+        ]
+        bt.logging.info(f"Starting {worker_count} independent verification workers")
+
+        # Clear any existing workers
+        self.stop_verification_workers()
+
+        # Track worker threads and their status
+        self.worker_threads = []
+        self.worker_status = {}
+
+        # Create and start independent worker threads
+        for i in range(worker_count):
+            thread = threading.Thread(
+                target=self._run_worker_in_thread,
+                args=(i,),
+                daemon=True,
+                name=f"verification_worker_{i}",
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+            self.worker_status[i] = {
+                "thread": thread,
+                "active": True,
+                "last_activity": time.time(),
+                "current_task": None,
+            }
+
+        # Start health monitor thread
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_worker_health, daemon=True, name="verification_monitor"
+        )
+        self.monitor_thread.start()
+
         bt.logging.info(
-            f"Starting {self.validator.validator_config.verification['max_concurrent_verifications']} verification workers"
+            f"Started {len(self.worker_threads)} independent verification worker threads"
         )
 
-        # Clear old workers if any
-        for worker in self.verification_workers:
-            if not worker.done():
-                worker.cancel()
-        self.verification_workers = []
+    def _run_worker_in_thread(self, worker_id):
+        """
+        Runs a verification worker in its own thread with a dedicated event loop.
 
-        # Create event loop and worker thread
-        self.verification_loop = asyncio.new_event_loop()
+        Args:
+            worker_id: Unique identifier for this worker
+        """
+        # Create independent event loop for this worker
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        # Recreate the queue
-        self.verification_queue = asyncio.Queue()
+        bt.logging.info(
+            f"Verification worker {worker_id} started with independent event loop"
+        )
 
-        # Run workers in new thread
-        def run_verification_workers():
-            asyncio.set_event_loop(self.verification_loop)
+        try:
+            # Run the worker coroutine
+            loop.run_until_complete(self._verification_worker(worker_id))
+        except Exception as e:
+            bt.logging.error(f"Error in verification worker {worker_id}: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+        finally:
+            # Clean up
+            loop.close()
+            bt.logging.info(f"Verification worker {worker_id} stopped")
 
-            # Create worker tasks
-            for i in range(
-                self.validator.validator_config.verification[
-                    "max_concurrent_verifications"
-                ]
-            ):
-                worker = self.verification_loop.create_task(
-                    self._verification_worker(worker_id=i)
-                )
-                self.verification_workers.append(worker)
-
-            # Run event loop
+    def _monitor_worker_health(self):
+        """
+        Monitors the health of verification workers and restarts any that appear to be stuck.
+        Runs in a separate thread to provide independent monitoring.
+        """
+        while True:
             try:
-                self.verification_loop.run_forever()
-            except Exception as e:
-                bt.logging.error(f"Verification worker event loop error: {str(e)}")
-                bt.logging.error(traceback.format_exc())
+                # Check each worker's status
+                current_time = time.time()
+                for worker_id, status in self.worker_status.items():
+                    if not status["active"]:
+                        continue
 
-        # Start worker thread
-        self.verification_thread = threading.Thread(
-            target=run_verification_workers, daemon=True
-        )
-        self.verification_thread.start()
-        bt.logging.info("Verification worker thread started")
+                    # Check if worker thread is alive
+                    if not status["thread"].is_alive():
+                        bt.logging.warning(
+                            f"Worker {worker_id} thread is not alive, restarting"
+                        )
+                        self._restart_worker(worker_id)
+                        continue
+
+                    # Check for inactivity
+                    last_activity = status["last_activity"]
+                    if current_time - last_activity > 3600:  # 1 hour without activity
+                        task_info = (
+                            f" on task {status['current_task']}"
+                            if status["current_task"]
+                            else ""
+                        )
+                        bt.logging.warning(
+                            f"Worker {worker_id} appears stuck{task_info}, restarting"
+                        )
+                        self._restart_worker(worker_id)
+
+                # Sleep before next check
+                time.sleep(300)  # Check every 5 minutes
+
+            except Exception as e:
+                bt.logging.error(f"Error in worker health monitor: {str(e)}")
+                bt.logging.error(traceback.format_exc())
+                time.sleep(60)  # Wait before retrying
+
+    def _restart_worker(self, worker_id):
+        """
+        Restarts a verification worker thread.
+
+        Args:
+            worker_id: ID of the worker to restart
+        """
+        try:
+            # Mark old worker as inactive
+            if worker_id in self.worker_status:
+                self.worker_status[worker_id]["active"] = False
+
+            # Start a new worker thread
+            thread = threading.Thread(
+                target=self._run_worker_in_thread,
+                args=(worker_id,),
+                daemon=True,
+                name=f"verification_worker_{worker_id}_restarted",
+            )
+            thread.start()
+
+            # Update worker status
+            self.worker_status[worker_id] = {
+                "thread": thread,
+                "active": True,
+                "last_activity": time.time(),
+                "current_task": None,
+            }
+
+            bt.logging.info(f"Restarted verification worker {worker_id}")
+
+        except Exception as e:
+            bt.logging.error(f"Failed to restart worker {worker_id}: {str(e)}")
+            bt.logging.error(traceback.format_exc())
 
     def stop_verification_workers(self):
         """
-        Stops all verification workers
+        Stops all verification workers and cleans up resources.
         """
         bt.logging.info("Stopping all verification workers")
 
-        # Cancel all tasks
-        if hasattr(self, "verification_workers"):
-            for worker in self.verification_workers:
-                if not worker.done():
-                    worker.cancel()
-            self.verification_workers = []
+        # Mark all workers as inactive
+        if hasattr(self, "worker_status"):
+            for worker_id in self.worker_status:
+                self.worker_status[worker_id]["active"] = False
 
-        # Stop event loop
-        if hasattr(self, "verification_loop") and self.verification_loop.is_running():
-            self.verification_loop.call_soon_threadsafe(self.verification_loop.stop)
+        # Clear the verification queue if it exists
+        if hasattr(self, "verification_queue") and self.verification_queue is not None:
+            while not self.verification_queue.empty():
+                try:
+                    self.verification_queue.get_nowait()
+                    self.verification_queue.task_done()
+                except queue.Empty:
+                    break
 
-        # Wait for thread to end
-        if hasattr(self, "verification_thread") and self.verification_thread.is_alive():
-            self.verification_thread.join(timeout=2.0)
-            if self.verification_thread.is_alive():
-                bt.logging.warning(
-                    "Verification worker thread did not stop within timeout"
-                )
+        # Wait for threads to end (with timeout)
+        if hasattr(self, "worker_threads"):
+            for thread in self.worker_threads:
+                if thread.is_alive():
+                    thread.join(timeout=2.0)
+
+        # Reset tracking variables
+        self.worker_threads = []
+        self.worker_status = {}
+        self.verification_queue = queue.Queue()
+
+        bt.logging.info("All verification workers stopped")
 
     async def _verification_worker(self, worker_id):
         """
-        Verification worker coroutine
-        Processes verification tasks from the queue
+        Verification worker coroutine that processes tasks from the queue.
 
         Args:
-            worker_id: Worker identifier
+            worker_id: Unique identifier for this worker
         """
-        bt.logging.info(f"Verification worker {worker_id} started")
+        bt.logging.info(f"Verification worker {worker_id} coroutine started")
 
         while True:
             try:
-                # Get next verification task
-                task = await self._get_next_verification_task()
-                if not task:
+                # Update worker status
+                if worker_id in self.worker_status:
+                    self.worker_status[worker_id]["last_activity"] = time.time()
+
+                # Get next task from the thread-safe queue with timeout
+                # Using blocking get with timeout instead of async to work with thread-safe queue
+                try:
+                    task = self.verification_queue.get(timeout=5.0)
+                    bt.logging.info(
+                        f"Worker {worker_id} received task {task['task_id']}"
+                    )
+
+                    # Update worker status with current task
+                    if worker_id in self.worker_status:
+                        self.worker_status[worker_id]["current_task"] = task["task_id"]
+                except queue.Empty:
                     # No task available, wait and try again
                     await asyncio.sleep(5)
                     continue
@@ -141,6 +260,7 @@ class VerificationManager:
                 # Skip if already being verified
                 if task_id in self.verifying_tasks:
                     bt.logging.debug(f"Task {task_id} already being verified, skipping")
+                    self.verification_queue.task_done()
                     continue
 
                 # Mark as being verified
@@ -152,20 +272,47 @@ class VerificationManager:
                 )
 
                 try:
-                    await self._execute_verification(
-                        task_id, miner_hotkey, miner_uid, worker_id
+                    # Set a timeout for the entire verification process
+                    start_time = time.time()
+                    verification_timeout = 1800  # 30 minutes
+
+                    # Create a task with timeout
+                    verification_task = asyncio.create_task(
+                        self._execute_verification(
+                            task_id, miner_hotkey, miner_uid, worker_id
+                        )
+                    )
+
+                    # Wait for verification to complete with timeout
+                    await asyncio.wait_for(
+                        verification_task, timeout=verification_timeout
+                    )
+
+                    # Update worker status - task completed
+                    elapsed_time = time.time() - start_time
+                    bt.logging.info(
+                        f"Worker {worker_id} completed task {task_id} in {elapsed_time:.2f}s"
+                    )
+
+                except asyncio.TimeoutError:
+                    bt.logging.error(
+                        f"Verification timeout for task {task_id} after {verification_timeout}s"
+                    )
+                    # Update as verification failed
+                    await self._update_verification_failed(
+                        task_id, miner_hotkey, miner_uid
                     )
 
                 except Exception as e:
                     bt.logging.error(f"Error verifying task {task_id}: {str(e)}")
                     bt.logging.error(traceback.format_exc())
-
                     # Update as verification failed
                     await self._update_verification_failed(
                         task_id, miner_hotkey, miner_uid
                     )
 
                 finally:
+                    # Clean up
                     # Add miner to verified miners set
                     self.verified_miners.add(miner_hotkey)
 
@@ -179,6 +326,14 @@ class VerificationManager:
                     if task_id in self.verifying_tasks:
                         self.verifying_tasks.remove(task_id)
 
+                    # Mark task as done in queue
+                    self.verification_queue.task_done()
+
+                    # Update worker status - no current task
+                    if worker_id in self.worker_status:
+                        self.worker_status[worker_id]["current_task"] = None
+                        self.worker_status[worker_id]["last_activity"] = time.time()
+
             except asyncio.CancelledError:
                 bt.logging.info(f"Verification worker {worker_id} cancelled")
                 break
@@ -186,7 +341,8 @@ class VerificationManager:
             except Exception as e:
                 bt.logging.error(f"Error in verification worker {worker_id}: {str(e)}")
                 bt.logging.error(traceback.format_exc())
-                await asyncio.sleep(5)  # Wait before retrying
+                # Wait before retrying to avoid tight error loops
+                await asyncio.sleep(5)
 
         bt.logging.info(f"Verification worker {worker_id} stopped")
 
@@ -197,7 +353,7 @@ class VerificationManager:
                 bt.logging.warning("Attempting to get task from wrong event loop")
                 return None
 
-            return await asyncio.wait_for(self.verification_queue.get(), timeout=1.0)
+            return await asyncio.wait_for(self.verification_queue.get(), timeout=6.0)
         except asyncio.TimeoutError:
             return None
         except RuntimeError as e:
@@ -596,7 +752,8 @@ class VerificationManager:
 
     def add_verification_task(self, task):
         """
-        Adds a task to verification queue
+        Adds a task to verification queue.
+        Uses thread-safe queue to distribute tasks to workers.
 
         Args:
             task: Task to verify
@@ -604,31 +761,20 @@ class VerificationManager:
         Returns:
             bool: True if task was successfully added to queue, False otherwise
         """
-        # Add to queue in thread-safe way
-        if hasattr(self, "verification_loop") and self.verification_loop.is_running():
-            try:
-                # Extract task details for potential rollback
-                task_id = task["task_id"]
-
-                # Add task to queue with timeout
-                future = asyncio.run_coroutine_threadsafe(
-                    self.verification_queue.put(task), self.verification_loop
-                )
-                future.result(timeout=180.0)
-                bt.logging.debug(f"Added task {task_id} to verification queue")
-                return True
-            except Exception as e:
-                bt.logging.error(f"Error adding task to verification queue: {str(e)}")
-                bt.logging.error(traceback.format_exc())
-
-                # Task failed to be added to queue, return False to indicate failure
-                # Status rollback will be handled by the caller
-                return False
-        else:
-            bt.logging.warning(
-                f"Cannot add task {task['task_id']} to verification queue: loop not running"
+        try:
+            # Add task to thread-safe queue with timeout
+            self.verification_queue.put(task, timeout=30.0)
+            bt.logging.debug(f"Added task {task['task_id']} to verification queue")
+            return True
+        except queue.Full:
+            bt.logging.error(
+                f"Verification queue is full, could not add task {task['task_id']}"
             )
-            return False  # Failed to add task to queue
+            return False
+        except Exception as e:
+            bt.logging.error(f"Error adding task to verification queue: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return False
 
     def get_verification_status(self):
         """

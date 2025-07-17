@@ -409,6 +409,7 @@ class MinerScoreManager:
         uids_to_calculate = (
             active_uids if active_uids is not None else list(self.miner_hotkeys.keys())
         )
+        bt.logging.info(f"online miners: {self.miner_online}")
         for uid in uids_to_calculate:
             if uid not in self.miner_online:
                 weights[uid] = 0
