@@ -25,7 +25,17 @@ class MinerManager:
         # Miner cache
         self.available_miners_cache = None
         self.miners_cache_time = 0
+        self.all_miner_hotkeys = {}
+        self.hotkey_to_uid = {}
+        self.miner_online = []
+        self.miner_info_cache = {}
         self.miners_cache_ttl = self.validator.validator_config.miners_cache_ttl
+
+    def init_miners_cache(self):
+        """
+        Initializes miner cache
+        """
+        self._update_miners_in_thread(self.validator.subtensor.get_current_block())
 
     def update_miners_on_block(self, block):
         """
@@ -68,8 +78,10 @@ class MinerManager:
 
             # Update miner information
             bt.logging.debug(f"Updating miner information on block {block}")
-            hotkeys = []  # For collecting miner hotkeys
             db_updates = []  # Store database update operations for batch processing
+            new_hotkeys = {}
+            hotkey_to_uid = {}
+            changed_uids = []
 
             # Update miner UIDs in database
             for uid in range(len(metagraph.hotkeys)):
@@ -79,24 +91,28 @@ class MinerManager:
 
                 # Get hotkey
                 hotkey = metagraph.hotkeys[uid]
-                hotkeys.append(hotkey)
-
                 # Add to database updates (will be processed later)
                 db_updates.append((hotkey, uid))
 
-            # Collect all miner hotkeys (including offline ones)
-            for uid in range(len(metagraph.hotkeys)):
-                if uid != self.validator.uid:
-                    hotkeys.append(metagraph.hotkeys[uid])
+                new_hotkeys[uid] = hotkey
+                hotkey_to_uid[hotkey] = uid
+                old_hotkey = self.all_miner_hotkeys.get(uid, None)
+
+                if old_hotkey and (old_hotkey != hotkey):
+                    changed_uids.append((uid, hotkey, old_hotkey))
+
+            self.all_miner_hotkeys = new_hotkeys
+            self.hotkey_to_uid = hotkey_to_uid
+            self.validator.deal_with_changed_uids(changed_uids)
 
             # Update miner info cache
-            self.miner_info_cache = {}
+            miner_info_cache = {}
             for uid in range(len(metagraph.hotkeys)):
                 if uid == self.validator.uid:
                     continue
 
                 hotkey = metagraph.hotkeys[uid]
-                self.miner_info_cache[hotkey] = {
+                miner_info_cache[hotkey] = {
                     "uid": uid,
                     "hotkey": hotkey,
                     "stake": float(metagraph.stake[uid]),
@@ -109,14 +125,11 @@ class MinerManager:
                 }
 
             # Save miner info cache to validator instance for other components to use
-            self.validator.miner_info_cache = self.miner_info_cache
+            self.validator.miner_info_cache = miner_info_cache
+            self.miner_info_cache = miner_info_cache
 
             # Update available miners
             self._update_available_miners_sync()
-
-            # Sync hotkeys to score_manager
-            self.validator.score_manager.sync_hotkeys(hotkeys, self.miner_info_cache)
-
             # Now process database updates in a new event loop
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -148,8 +161,6 @@ class MinerManager:
             validator_stake_limit = 1000
 
             available_miners = []
-            hotkeys = []
-            # Create miner information cache
             miner_info_cache = {}
 
             # Iterate through all nodes
@@ -162,9 +173,6 @@ class MinerManager:
                 stake = self.validator.metagraph.S[uid].item()
                 axon = self.validator.metagraph.axons[uid]
                 hotkey = self.validator.metagraph.hotkeys[uid]
-
-                # Collect all miners' hotkeys (including offline ones).
-                hotkeys.append(hotkey)
 
                 # Cache miner information
                 miner_info_cache[hotkey] = {
@@ -200,92 +208,14 @@ class MinerManager:
             # Update cache
             random.shuffle(available_miners)
             self.available_miners_cache = available_miners
+            self.miner_online = available_miners
             self.miners_cache_time = time.time()
-
-            # Cache the miner information in the validator instance for use by other components.
-            self.validator.miner_info_cache = miner_info_cache
+            self.validator.score_manager.upldate_miner_state()
 
             bt.logging.info(
-                f"Updated available miners list, found {len(available_miners)} available miners"
+                f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners}"
             )
             bt.logging.info(f"Cached information for {len(miner_info_cache)} miners")
-
-        except Exception as e:
-            bt.logging.error(f"Error updating miners list: {str(e)}")
-            bt.logging.error(traceback.format_exc())
-
-    async def _update_available_miners(self):
-        """Asynchronously updates available miners list"""
-        try:
-            # Validator stake limit (validators with stake above this won't be selected as miners)
-            validator_stake_limit = 1000
-
-            available_miners = []
-            hotkeys = []
-            # Create miner information cache
-            miner_info_cache = {}
-
-            # Iterate through all nodes
-            for uid in range(len(self.validator.metagraph.hotkeys)):
-                # Skip self
-                if uid == self.validator.uid:
-                    continue
-
-                # Get node info
-                stake = self.validator.metagraph.S[uid].item()
-                axon = self.validator.metagraph.axons[uid]
-                hotkey = self.validator.metagraph.hotkeys[uid]
-
-                # Collect all miners' hotkeys (including offline ones).
-                hotkeys.append(hotkey)
-
-                # Cache miner information
-                miner_info_cache[hotkey] = {
-                    "uid": uid,
-                    "stake": stake,
-                    "axon": {
-                        "ip": axon.ip,
-                        "port": axon.port,
-                        "is_serving": axon.is_serving,
-                    },
-                    "hotkey": hotkey,
-                }
-
-                # Check if node is online
-                is_online = axon.is_serving and axon.ip != "0.0.0.0" and axon.port != 0
-                if not is_online:
-                    continue
-
-                # Skip validators with high stake
-                if (
-                    hasattr(self.validator.metagraph, "validator_permit")
-                    and self.validator.metagraph.validator_permit[uid]
-                ):
-                    if stake > validator_stake_limit:
-                        bt.logging.debug(
-                            f"Skipping UID {uid}: validator stake too high ({stake} > {validator_stake_limit})"
-                        )
-                        continue
-
-                # Add to available miners list
-                available_miners.append(uid)
-
-            # Update cache
-            random.shuffle(available_miners)
-            self.available_miners_cache = available_miners
-            self.miners_cache_time = time.time()
-
-            # Cache the miner information in the validator instance for use by other components.
-            self.validator.miner_info_cache = miner_info_cache
-
-            bt.logging.info(
-                f"Updated available miners list, found {len(available_miners)} available miners"
-            )
-            bt.logging.info(f"Cached information for {len(miner_info_cache)} miners")
-
-            # Sync hotkeys to score_manager
-            self.validator.score_manager.sync_hotkeys(hotkeys, miner_info_cache)
-            bt.logging.info(f"Synced {len(hotkeys)} hotkeys to score manager")
 
         except Exception as e:
             bt.logging.error(f"Error updating miners list: {str(e)}")

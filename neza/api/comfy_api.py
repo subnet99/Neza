@@ -14,7 +14,7 @@ class ComfyAPI:
     ComfyUI API wrapper class
     """
 
-    def __init__(self, servers: List[Dict[str, str]] = None):
+    def __init__(self, servers: List[Dict[str, str]] = None, clear_queue=False):
         """
         Initialize ComfyAPI class
 
@@ -22,10 +22,6 @@ class ComfyAPI:
             servers: List of ComfyUI servers, format: [{"host": "127.0.0.1", "port": "8188"}, ...]
                     If None, servers will be retrieved from environment variables
         """
-        # If no servers provided, get from environment variables
-        if servers is None:
-            servers = self._parse_env_servers()
-
         self.servers = []
         # Process each server configuration
         for server in servers:
@@ -54,46 +50,14 @@ class ComfyAPI:
                     "available": False,  # Whether server is available
                 }
             )
-        bt.logging.info(f"ComfyUI servers: {self.servers}")
 
         # Check if ComfyUI servers are available
         for server in self.servers:
-            self._check_server_availability(server)
+            self._check_server_availability(server, clear_queue)
 
-    @staticmethod
-    def _parse_env_servers() -> List[Dict[str, str]]:
-        """
-        Parse server list from environment variables
-
-        Environment variable format: COMFYUI_SERVERS=host1:port1,host2:port2,...
-        If COMFYUI_SERVERS is not set, default to "127.0.0.1:8188"
-
-        Returns:
-            List[Dict[str, str]]: List of server configurations
-        """
-        servers = []
-
-        # Use COMFYUI_SERVERS environment variable
-        comfy_servers = os.environ.get("COMFYUI_SERVERS", "127.0.0.1:8188")
-
-        # Split multiple server addresses by comma
-        for server_str in comfy_servers.split(","):
-            server_str = server_str.strip()
-            if not server_str:
-                continue
-
-            # Parse host and port
-            if ":" in server_str:
-                host, port = server_str.split(":", 1)
-            else:
-                host = server_str
-                port = "8188"  # Default port
-
-            servers.append({"host": host, "port": port})
-
-        return servers
-
-    def _check_server_availability(self, server: Dict[str, Any]) -> None:
+    def _check_server_availability(
+        self, server: Dict[str, Any], clear_queue: False
+    ) -> None:
         """
         Check if a ComfyUI server is available by attempting to connect to its queue API endpoint.
         """
@@ -104,26 +68,27 @@ class ComfyAPI:
 
             # Add timeout setting
             response = requests.get(
-                f"{host_for_http}:{server['port']}/queue", timeout=10
+                f"{host_for_http}:{server['port']}/queue", timeout=30
             )
             if response.status_code == 200:
-                bt.logging.info(
-                    f"ComfyUI server {host_for_http}:{server['port']} is available."
-                )
+                bt.logging.info(f"ComfyUI server ***:{server['port']} is available.")
                 server["available"] = True
+                if clear_queue:
+                    self.clear_server_queue(server)
+                    self.interrupt_server_processing(server)
             else:
                 bt.logging.warning(
-                    f"ComfyUI server {host_for_http}:{server['port']} is not available. Status code: {response.status_code}"
+                    f"ComfyUI server ***:{server['port']} is not available. Status code: {response.status_code}"
                 )
                 server["available"] = False
         except requests.exceptions.RequestException as e:
             bt.logging.warning(
-                f"ComfyUI server {server['host']}:{server['port']} is not available due to network error: {str(e)}"
+                f"ComfyUI server ***:{server['port']} is not available due to network error: {str(e)}"
             )
             server["available"] = False
         except Exception as e:
             bt.logging.warning(
-                f"ComfyUI server {server['host']}:{server['port']} is not available due to an unexpected error: {str(e)}"
+                f"ComfyUI server ***:{server['port']} is not available due to an unexpected error: {str(e)}"
             )
             server["available"] = False
 
@@ -177,6 +142,17 @@ class ComfyAPI:
             print(f"Error getting queue info: {str(e)}")
             print(traceback.format_exc())
             return float("inf")
+
+    def _get_server_by_worker_id(
+        self, worker_id: int = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get server by worker ID
+        """
+        if worker_id is None:
+            return self._get_best_server()
+        else:
+            return self.servers[worker_id]
 
     def _get_best_server(self) -> Optional[Dict[str, Any]]:
         """
@@ -252,7 +228,7 @@ class ComfyAPI:
                 # Check if server is available
                 if not server["available"]:
                     bt.logging.warning(
-                        f"Server {server['host']}:{server['port']} not available, checking availability"
+                        f"Server ***:{server['port']} not available, checking availability"
                     )
                     self._check_server_availability(server)
 
@@ -304,7 +280,14 @@ class ComfyAPI:
                 f"{host_for_http}:{server['port']}/history/{prompt_id}", timeout=60
             )
             if response.status_code == 200:
-                history = response.json()[prompt_id]
+                response_data = response.json()
+
+                # Skip if history is None
+                if prompt_id not in response_data:
+                    bt.logging.info(f"History is None for prompt_id: {prompt_id}")
+                    return []
+
+                history = response_data[prompt_id]
 
                 # Extract all gif filenames
                 filenames = []
@@ -323,7 +306,7 @@ class ComfyAPI:
             return []
 
     def execute_comfy_workflow(
-        self, workflow: Dict[str, Any], task_id: str = None
+        self, workflow: Dict[str, Any], task_id: str = None, worker_id: int = None
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Execute ComfyUI workflow and return output filename
@@ -331,12 +314,14 @@ class ComfyAPI:
         Args:
             workflow: Complete workflow configuration
             task_id: Task ID, used for logging
+            worker_id: Worker ID for server selection
 
         Returns:
             Tuple[bool, str, Dict[str, Any]]: (whether successful, output filename, server info), returns (False, "", None) if failed
         """
         # Get server with lowest load
-        server = self._get_best_server()
+        server = self._get_server_by_worker_id(worker_id)
+
         if server is None:
             bt.logging.error("No available ComfyUI servers")
             return False, "", None
@@ -344,13 +329,11 @@ class ComfyAPI:
         # Double-check server availability
         if not server["available"]:
             bt.logging.warning(
-                f"Server {server['host']}:{server['port']} not available, checking availability"
+                f"Server ***:{server['port']} not available, checking availability"
             )
             self._check_server_availability(server)
             if not server["available"]:
-                bt.logging.error(
-                    f"Server {server['host']}:{server['port']} is still not available"
-                )
+                bt.logging.error(f"Server ***:{server['port']} is still not available")
                 return False, "", None
 
         try:
@@ -362,7 +345,7 @@ class ComfyAPI:
             # Log task information
             task_log = f"task_id: {task_id}" if task_id else "no task_id"
             bt.logging.info(
-                f"Executing ComfyUI workflow ({task_log}) on server {host_for_http}:{server['port']}"
+                f"Executing ComfyUI workflow ({task_log}) on server ***:{server['port']}"
             )
 
             # Add timeout setting
@@ -379,7 +362,7 @@ class ComfyAPI:
 
                 if response.status_code != 200:
                     bt.logging.error(
-                        f"ComfyUI server {host_for_http}:{server['port']} returned error status code: {response.status_code}"
+                        f"ComfyUI server ***:{server['port']} returned error status code: {response.status_code}"
                     )
                     bt.logging.error(f"Response content: {response.text}")
                     # Mark server as unavailable if it returns an error
@@ -463,3 +446,77 @@ class ComfyAPI:
             Tuple[bool, str, Dict[str, Any]]: (whether successful, output filename, server info)
         """
         return self.execute_comfy_workflow(workflow, task_id)
+
+    def clear_server_queue(self, server: Dict[str, Any]) -> bool:
+        """
+        Clear the queue of a ComfyUI server
+
+        Args:
+            server: Server configuration
+
+        Returns:
+            bool: Whether clearing was successful
+        """
+        try:
+            host_for_http = server["host"]
+            if not host_for_http.startswith(("http://", "https://")):
+                host_for_http = f"http://{host_for_http}"
+
+            response = requests.post(
+                f"{host_for_http}:{server['port']}/queue",
+                json={"clear": True},
+                timeout=20,
+            )
+
+            if response.status_code == 200:
+                bt.logging.info(
+                    f"Successfully cleared queue for server ***:{server['port']}"
+                )
+                return True
+            else:
+                bt.logging.warning(
+                    f"Failed to clear queue for server ***:{server['port']}, status code: {response.status_code}"
+                )
+                return False
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error clearing queue for server ***:{server['port']}: {str(e)}"
+            )
+            return False
+
+    def interrupt_server_processing(self, server: Dict[str, Any]) -> bool:
+        """
+        Interrupt current processing on a ComfyUI server
+
+        Args:
+            server: Server configuration
+
+        Returns:
+            bool: Whether interruption was successful
+        """
+        try:
+            host_for_http = server["host"]
+            if not host_for_http.startswith(("http://", "https://")):
+                host_for_http = f"http://{host_for_http}"
+
+            response = requests.post(
+                f"{host_for_http}:{server['port']}/interrupt", timeout=20
+            )
+
+            if response.status_code == 200:
+                bt.logging.info(
+                    f"Successfully interrupted processing for server ***:{server['port']}"
+                )
+                return True
+            else:
+                bt.logging.warning(
+                    f"Failed to interrupt processing for server ***:{server['port']}, status code: {response.status_code}"
+                )
+                return False
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error interrupting processing for server ***:{server['port']}: {str(e)}"
+            )
+            return False

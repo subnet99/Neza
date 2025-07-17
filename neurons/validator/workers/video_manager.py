@@ -166,7 +166,7 @@ class VideoManager:
         retry_count = 0
         while retry_count < max_retries:
             try:
-                bt.logging.info(f"Downloading video from {url} to {save_path}")
+                # bt.logging.info(f"Downloading video from {url} to {save_path}")
                 response = requests.get(url, stream=True, timeout=timeout)
                 response.raise_for_status()
 
@@ -205,7 +205,7 @@ class VideoManager:
             bool: Whether download was successful
         """
         try:
-            bt.logging.info(f"Downloading from S3: {s3_url}")
+            # bt.logging.info(f"Downloading from S3: {s3_url}")
             response = requests.get(s3_url, stream=True)
             response.raise_for_status()
 

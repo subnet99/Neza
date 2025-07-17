@@ -1,4 +1,6 @@
 import bittensor as bt
+import os
+from neza.utils.tools import _parse_env_servers
 
 
 class ValidatorConfig:
@@ -24,9 +26,6 @@ class ValidatorConfig:
         # Miner cache configuration
         self.miners_cache_ttl = 60  # Cache TTL in seconds
 
-        # Verification task management
-        self.send_task_interval = 60  # Task sending interval in seconds
-
         # File size limit configuration
         self.file_size_limit = 10
 
@@ -36,13 +35,17 @@ class ValidatorConfig:
         # Miner selection configuration
         self.miner_selection = {
             "send_cycle_length": 21600,  # send cycle length in seconds (6 h)
-            "generate_max_tasks": 1,  # Maximum synthetic tasks
+            "generate_max_tasks": 3,  # Maximum synthetic tasks
             "density_float_ratio": 0.003,  # Task density float ratio (0.3%)
         }
 
+        self.comfy_servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
+
         # Verification configuration
         self.verification = {
-            "max_concurrent_verifications": 1,  # Maximum concurrent verification workers
+            "max_concurrent_verifications": max(
+                1, len(self.comfy_servers)
+            ),  # Maximum concurrent verification workers
             "verification_sample_rate": 1.0,
             "new_miner_priority": True,  # Prioritize new miners
             "low_verification_threshold": 5,  # Low verification count threshold

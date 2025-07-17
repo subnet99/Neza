@@ -60,10 +60,6 @@ class VideoValidator(BaseValidatorNeuron):
         # Get workflow mapping configuration
         self.workflow_mapping = self.material_manager.get_workflow_mapping()
 
-        # Initialize score manager
-        self.score_manager = MinerScoreManager(self.validator_config)
-        self.score_manager.initialize(self.metagraph)
-
         # Initialize video verifier
         self.verifier = VideoVerifier(self)
         self.video_manager = VideoManager()
@@ -73,6 +69,11 @@ class VideoValidator(BaseValidatorNeuron):
         self.penalty_manager = PenaltyManager(self)
         self.task_manager = TaskManager(self)
         self.verification_manager = VerificationManager(self)
+
+        # Initialize score manager
+        self.score_manager = MinerScoreManager(self.validator_config, self)
+        self.miner_manager.init_miners_cache()
+        self.score_manager.initialize()
 
         # Initialize miner info cache
         self.miner_info_cache = None
@@ -263,6 +264,37 @@ class VideoValidator(BaseValidatorNeuron):
         bt.logging.info(f"Found {len(all_uids)} total miners (including offline)")
         return all_uids
 
+    def deal_with_changed_uids(self, changed_uids):
+        """
+        Processing changes in UIDs, including newly added and replaced miners.
+
+        Args:
+            changed_uids: List of changed UIDs, each item is a tuple of (uid, current_hotkey, old_hotkey).
+        """
+        if not changed_uids:
+            return
+
+        bt.logging.info(f"Processing {len(changed_uids)} changed miner UIDs")
+
+        try:
+            for uid, current_hotkey, old_hotkey in changed_uids:
+                bt.logging.info(
+                    f"Handled UID change for {uid}: {old_hotkey} -> {current_hotkey}"
+                )
+
+                self.verification_manager._handle_hotkey_change(
+                    old_hotkey, current_hotkey
+                )
+
+                self.task_manager._handle_hotkey_change(old_hotkey, current_hotkey)
+
+            # 3. Clear scores for all changed UIDs
+            self.score_manager._clear_miners_scores([uid for uid, _, _ in changed_uids])
+
+        except Exception as e:
+            bt.logging.error(f"Error processing changed UIDs: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
     def set_weights(self):
         """Sets weights for miners"""
         self.update_base_scores()
@@ -271,17 +303,6 @@ class VideoValidator(BaseValidatorNeuron):
         super().set_weights()
         bt.logging.info("==========end Setting weights==========")
         return
-
-    def _get_available_uids_for_weights(self):
-        """Gets available UIDs for weight setting"""
-        vpermit_tao_limit = getattr(
-            self.config, "vpermit_tao_limit", 100
-        )  # Default 100 TAO
-        return self.score_manager.get_available_miners(
-            metagraph=self.metagraph,
-            self_uid=self.uid,
-            vpermit_tao_limit=vpermit_tao_limit,
-        )
 
     def _calculate_and_set_weights(self, available_uids):
         """Calculates and sets weights"""
@@ -479,26 +500,6 @@ class VideoValidator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.error(f"Error in score_step: {str(e)}")
             bt.logging.error(traceback.format_exc())
-
-    def set_task_sending_interval(self, interval_seconds):
-        """
-        Set the interval between task sending operations
-
-        Args:
-            interval_seconds: Number of seconds to wait between task sending
-        """
-        if interval_seconds < 1:
-            bt.logging.warning(
-                f"Task interval too small: {interval_seconds}, setting to 1 second"
-            )
-            interval_seconds = 1
-
-        old_interval = self.validator_config.send_task_interval
-        self.validator_config.send_task_interval = interval_seconds
-
-        bt.logging.info(
-            f"Task sending interval changed from {old_interval} to {interval_seconds} seconds"
-        )
 
     def move_scores_on_interval(self, block):
         """

@@ -46,12 +46,12 @@ async def check_url_resource_available(url, get_file_info=False, timeout=30):
             return True, file_info
         else:
             bt.logging.warning(
-                f"Resource URL returned non-success status code: {status_code}, URL: {url}"
+                f"Resource URL returned non-success status code: {status_code}, URL: {url[:142]}..."
             )
             return False, file_info
 
     except Exception as e:
-        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url}")
+        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url[:142]}...")
         return False, {}
 
 
@@ -101,7 +101,7 @@ async def http_get_request(url, timeout=30, json_response=False):
             async with session.get(url, timeout=timeout) as response:
                 if response.status >= 400:
                     bt.logging.error(
-                        f"HTTP GET request failed, status code: {response.status}, URL: {url}"
+                        f"HTTP GET request failed, status code: {response.status}, URL: {url[:142]}..."
                     )
                     return None
 
@@ -143,7 +143,7 @@ async def http_post_request(
             ) as response:
                 if response.status >= 400:
                     bt.logging.error(
-                        f"HTTP POST request failed, status code: {response.status}, URL: {url}"
+                        f"HTTP POST request failed, status code: {response.status}, URL: {url[:142]}..."
                     )
                     return None
 
@@ -336,7 +336,6 @@ async def upload_task_result(
                     )
     except Exception as e:
         bt.logging.error(f"Error uploading task result: {str(e)}")
-        bt.logging.error(traceback.format_exc())
 
 
 async def http_put_request(
@@ -364,7 +363,7 @@ async def http_put_request(
             ) as response:
                 if response.status >= 400:
                     bt.logging.error(
-                        f"HTTP PUT request failed, status code: {response.status}, URL: {url}"
+                        f"HTTP PUT request failed, status code: {response.status}, URL: {url[:142]}..."
                     )
                     return None, response.status
 
@@ -405,7 +404,7 @@ def http_put_request_sync(
 
         if response.status_code >= 400:
             bt.logging.error(
-                f"HTTP PUT request failed, status code: {response.status_code}, URL: {url}"
+                f"HTTP PUT request failed, status code: {response.status_code}, URL: {url[:142]}..."
             )
             return None, response.status_code
 
@@ -447,7 +446,7 @@ def http_get_request_sync(
 
         if response.status_code >= 400:
             bt.logging.error(
-                f"HTTP GET request failed, status code: {response.status_code}, URL: {url}"
+                f"HTTP GET request failed, status code: {response.status_code}, URL: {url[:142]}..."
             )
             return None, response.status_code
 
@@ -490,7 +489,9 @@ def check_get_url_resource_available_sync(url, get_file_info=False, timeout=10):
 
         # If file information is not needed, return status code directly
         if not get_file_info:
-            bt.logging.info(f"HTTP HEAD: status code {status_code}, URL: {url}")
+            bt.logging.info(
+                f"HTTP HEAD: status code {status_code}, URL: {url[:142]}..."
+            )
             return (status_code, {})
 
         # Create file_info object
@@ -522,13 +523,13 @@ def check_get_url_resource_available_sync(url, get_file_info=False, timeout=10):
                 )
 
         bt.logging.info(
-            f"HTTP HEAD: status code {status_code}, URL: {url}, file size: {file_info['file_size']}, last modified: {file_info['last_modified']}"
+            f"HTTP HEAD: status code {status_code}, URL: {url[:142]}..., file size: {file_info['file_size']}, last modified: {file_info['last_modified']}"
         )
         return (status_code, file_info)
 
     except requests.exceptions.RequestException as e:
-        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url}")
+        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url[:142]}...")
         return False if not get_file_info else (False, {})
     except Exception as e:
-        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url}")
+        bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url[:142]}...")
         return False if not get_file_info else (False, {})

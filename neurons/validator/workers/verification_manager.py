@@ -29,6 +29,9 @@ class VerificationManager:
 
         # Verification cycle management
         self.verified_miners = set()  # Set of miners verified in current cycle
+        self.verified_task_counts = (
+            {}
+        )  # Dict mapping miner hotkey to number of verified tasks
         self.verification_cycle_start = (
             time.time()
         )  # Current verification cycle start time
@@ -149,7 +152,9 @@ class VerificationManager:
                 )
 
                 try:
-                    await self._execute_verification(task_id, miner_hotkey, miner_uid)
+                    await self._execute_verification(
+                        task_id, miner_hotkey, miner_uid, worker_id
+                    )
 
                 except Exception as e:
                     bt.logging.error(f"Error verifying task {task_id}: {str(e)}")
@@ -163,6 +168,13 @@ class VerificationManager:
                 finally:
                     # Add miner to verified miners set
                     self.verified_miners.add(miner_hotkey)
+
+                    # Update verified task count for this miner
+                    if miner_hotkey in self.verified_task_counts:
+                        self.verified_task_counts[miner_hotkey] += 1
+                    else:
+                        self.verified_task_counts[miner_hotkey] = 1
+
                     # Remove from verifying tasks
                     if task_id in self.verifying_tasks:
                         self.verifying_tasks.remove(task_id)
@@ -204,7 +216,7 @@ class VerificationManager:
                 return uid
         return None
 
-    async def _execute_verification(self, task_id, miner_hotkey, miner_uid):
+    async def _execute_verification(self, task_id, miner_hotkey, miner_uid, worker_id):
         """
         Executes verification for a task
 
@@ -212,6 +224,7 @@ class VerificationManager:
             task_id: Task ID to verify
             miner_hotkey: Miner hotkey
             miner_uid: Miner UID
+            worker_id: Worker ID for server selection
         """
         try:
             # Add verification start time
@@ -223,8 +236,7 @@ class VerificationManager:
                 bt.logging.warning(f"Task {task_id} not found in database")
                 return
 
-            # Verify task
-            score, result = await self._verify_task(task_details)
+            score, result = await self._verify_task(task_details, worker_id)
 
             # Get completion_time from database
             # This value should be calculated as last_modified - last_sent_at in the database
@@ -298,12 +310,13 @@ class VerificationManager:
             bt.logging.error(traceback.format_exc())
             return None
 
-    async def _verify_task(self, task_details):
+    async def _verify_task(self, task_details, worker_id):
         """
         Verifies a task
 
         Args:
             task_details: Task details from database
+            worker_id: Worker ID for server selection
 
         Returns:
             tuple: (score, result) where score is a float and result is a dict
@@ -325,7 +338,7 @@ class VerificationManager:
 
             # Perform verification
             score, result = await self._perform_verification(
-                task_id, complete_workflow, completion_time
+                task_id, complete_workflow, completion_time, worker_id
             )
 
             return score, result
@@ -379,7 +392,7 @@ class VerificationManager:
             return {}
 
     async def _perform_verification(
-        self, task_id, complete_workflow, completion_time=None
+        self, task_id, complete_workflow, completion_time=None, worker_id=None
     ):
         """
         Performs verification using video verifier
@@ -388,6 +401,7 @@ class VerificationManager:
             task_id: Task ID
             complete_workflow: Complete workflow
             completion_time: Task completion time in seconds
+            worker_id: Worker ID for server selection
 
         Returns:
             tuple: (score, result) where score is a float and result is a dict
@@ -401,6 +415,7 @@ class VerificationManager:
                 task_id=task_id,
                 complete_workflow=complete_workflow,
                 completion_time=completion_time,
+                worker_id=worker_id,
             )
 
             return score, result
@@ -541,8 +556,11 @@ class VerificationManager:
         old_count = len(self.verified_miners)
         self.verified_miners = set()
 
+        # Reset verified task counts
+        self.verified_task_counts = {}
+
         bt.logging.info(
-            f"Reset verification cycle, cleared {old_count} verified miners"
+            f"Reset verification cycle, cleared {old_count} verified miners and task counts"
         )
 
     def get_worker_count(self):
@@ -640,6 +658,8 @@ class VerificationManager:
         # Get verified miners count
         verified_miners = len(self.verified_miners)
 
+        # Get total verified tasks count
+        total_verified_tasks = sum(self.verified_task_counts.values())
         # Get worker count
         worker_count = self.get_worker_count()
 
@@ -654,6 +674,7 @@ class VerificationManager:
             "queue_size": queue_size,
             "active_verifications": active_verifications,
             "verified_miners": verified_miners,
+            "total_verified_tasks": total_verified_tasks,
             "worker_count": worker_count,
         }
 
@@ -684,17 +705,18 @@ class VerificationManager:
                 miner_task_count[miner_hotkey] = 0
             miner_task_count[miner_hotkey] += 1
 
-        # Get currently verified miners
-        verified_miners = self.verified_miners
-
-        # Calculate verification density (verified count / total task count)
+        # Calculate verification density (verified tasks count / total task count)
         for miner_hotkey, task_count in miner_task_count.items():
-            # If miner has been verified in current cycle, increase density
-            verification_count = 1 if miner_hotkey in verified_miners else 0
+            # Get number of verified tasks for this miner in current cycle
+            verification_count = self.verified_task_counts.get(miner_hotkey, 0)
 
             # Calculate density
             density = verification_count / max(1, task_count)
             miner_verification_density[miner_hotkey] = density
+
+            bt.logging.debug(
+                f"Miner {miner_hotkey[:10]}... verification density: {density:.4f} ({verification_count}/{task_count})"
+            )
 
         # Sort tasks by verification density
         sorted_tasks = sorted(
@@ -708,6 +730,31 @@ class VerificationManager:
         )
 
         return sorted_tasks
+
+    def _handle_hotkey_change(self, old_hotkey, new_hotkey):
+        """
+        Updates verified task counts when a hotkey changes
+
+        Args:
+            old_hotkey: Previous hotkey
+            new_hotkey: New hotkey
+        """
+        try:
+            # Get minimum count from all miners and subtract 1, but not less than 0
+            min_count = (
+                min(list(self.verified_task_counts.values()))
+                if self.verified_task_counts
+                else 0
+            )
+            self.verified_task_counts[new_hotkey] = max(0, min_count - 1)
+            if old_hotkey in self.verified_task_counts:
+                del self.verified_task_counts[old_hotkey]
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error updating verified task counts for changed hotkey: {str(e)}"
+            )
+            bt.logging.error(traceback.format_exc())
 
     async def upload_task(self, task_id, miner_hotkey, score, metrics, completion_time):
         # Get task details for upload

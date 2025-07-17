@@ -37,7 +37,7 @@ class MinerScoreManager:
     LOW_SCORE_THRESHOLD = 1.1
     BASE_SCORE = 0.05
 
-    def __init__(self, config):
+    def __init__(self, config, validator):
         """Initialize score manager
 
         Args:
@@ -98,6 +98,7 @@ class MinerScoreManager:
                 f"Using default score_manager configuration: cache_version={self.cache_version}"
             )
 
+        self.validator = validator
         # Current cycle score records
         self.current_scores = {}  # {uid: [score1, score2, ...]}
 
@@ -106,21 +107,14 @@ class MinerScoreManager:
             {}
         )  # {uid: [avg_score1, avg_score2, ...], maximum 30 historical records}
 
-        # Miner hotkey mapping
-        self.miner_hotkeys = {}
-
-        # Reverse mapping for easy lookup of UID by hotkey
-        self.hotkey_to_uid = {}
-
-        # Miner online status
-        self.miner_online = {}
-
         # Miner task scores
         self.task_scores = {}  # {uid: [score1, score2, ...]}
 
+        self.upldate_miner_state()
+
         bt.logging.info("Miner score manager initialization complete")
 
-    def initialize(self, metagraph):
+    def initialize(self):
         """Initialize score manager and load cache
 
         Args:
@@ -130,25 +124,9 @@ class MinerScoreManager:
             bool: Whether initialization was successful
         """
         try:
-            # Sync current hotkey mapping
-            self.sync_hotkeys(metagraph)
-
             # Load cached data
             self.load_cache()
 
-            self.hotkey_to_uid = {
-                hotkey: uid for uid, hotkey in self.miner_hotkeys.items()
-            }
-            bt.logging.info(
-                f"After initialization, hotkey_to_uid has {len(self.hotkey_to_uid)} entries"
-            )
-
-            # Update miner online status
-            self.update_miner_status(metagraph)
-
-            bt.logging.info(
-                f"Score manager initialization complete, currently tracking {len(self.miner_hotkeys)} miners"
-            )
             return True
         except Exception as e:
             bt.logging.error(f"Failed to initialize score manager: {str(e)}")
@@ -205,23 +183,20 @@ class MinerScoreManager:
                         int(k): v for k, v in data["miner_hotkeys"].items()
                     }
 
-                    # Check if we already have hotkeys (from metagraph)
+                    # Check if we already have hotkeys
                     if self.miner_hotkeys:
                         # Check if hotkeys have changed, if changed clear scores for that UID
+                        need_clear_uids = []
                         for uid, hotkey in self.miner_hotkeys.items():
                             if uid in cached_hotkeys and cached_hotkeys[uid] != hotkey:
                                 bt.logging.warning(
                                     f"Detected hotkey change for UID {uid}: {cached_hotkeys[uid]} -> {hotkey}, clearing score records"
                                 )
-                                self._clear_miner_scores(uid)
+                                need_clear_uids.append(uid)
+                        self._clear_miners_scores(need_clear_uids)
                     else:
                         # If we don't have hotkeys yet, use the cached ones
                         self.miner_hotkeys = cached_hotkeys
-
-                    # Update Reverse Mapping
-                    self.hotkey_to_uid = {
-                        hotkey: uid for uid, hotkey in self.miner_hotkeys.items()
-                    }
 
                 bt.logging.info(
                     f"Loaded historical scores for {len(self.historical_scores)} miners from cache"
@@ -233,9 +208,29 @@ class MinerScoreManager:
             bt.logging.error(f"Failed to load cache: {str(e)}")
             bt.logging.error(traceback.format_exc())
 
+    def upldate_miner_state(self):
+        """Initialize state"""
+        self.miner_hotkeys = self.validator.miner_manager.all_miner_hotkeys
+        self.hotkey_to_uid = self.validator.miner_manager.hotkey_to_uid
+        self.miner_online = self.validator.miner_manager.miner_online
+
     def load_state(self):
         """Alias for load_cache to maintain compatibility with validator.py"""
         return self.load_cache()
+
+    def _clear_miners_scores(self, uids):
+        """Clear all score records for the specified miners
+
+        Args:
+            uids: List of UIDs of the miners to clear scores for
+        """
+        if not uids:
+            return
+
+        for uid in uids:
+            self._clear_miner_scores(uid)
+
+        self.save_cache()
 
     def _clear_miner_scores(self, uid):
         """Clear all score records for the specified miner
@@ -249,89 +244,6 @@ class MinerScoreManager:
             del self.current_scores[uid]
         if uid in self.task_scores:
             del self.task_scores[uid]
-
-    def sync_hotkeys(self, hotkeys_or_metagraph, miner_info_cache=None):
-        """Sync miner hotkeys, detect changes and clear scores for changed miners
-
-        Args:
-            hotkeys_or_metagraph: List of miner hotkeys or metagraph object
-            miner_info_cache: Optional, miner info cache for getting real UIDs when hotkeys list is provided
-
-        Returns:
-            List[int]: List of UIDs that have changed
-        """
-        new_hotkeys = {}
-        changed_uids = []
-
-        # Check input type
-        if hasattr(hotkeys_or_metagraph, "hotkeys"):
-            # If it's a metagraph object
-            if hasattr(hotkeys_or_metagraph, "uids"):
-                # Use real UIDs from metagraph
-                for i, uid in enumerate(hotkeys_or_metagraph.uids.tolist()):
-                    new_hotkeys[uid] = hotkeys_or_metagraph.hotkeys[i]
-            else:
-                # Fallback to enumeration if uids not available
-                for uid, hotkey in enumerate(hotkeys_or_metagraph.hotkeys):
-                    new_hotkeys[uid] = hotkey
-        else:
-            # If it's a hotkeys list
-            if miner_info_cache:
-                # Use miner_info_cache to get real UIDs
-                for hotkey in hotkeys_or_metagraph:
-                    if hotkey in miner_info_cache and "uid" in miner_info_cache[hotkey]:
-                        uid = miner_info_cache[hotkey]["uid"]
-                        new_hotkeys[uid] = hotkey
-                    else:
-                        bt.logging.warning(
-                            f"No UID found for hotkey {hotkey[:10]}... in miner_info_cache"
-                        )
-            else:
-                # Fallback to enumeration if miner_info_cache not available
-                for uid, hotkey in enumerate(hotkeys_or_metagraph):
-                    new_hotkeys[uid] = hotkey
-                bt.logging.warning(
-                    "Using enumeration for UIDs as miner_info_cache not provided"
-                )
-
-        # Check for changes
-        for uid, hotkey in new_hotkeys.items():
-            if uid in self.miner_hotkeys and self.miner_hotkeys[uid] != hotkey:
-                bt.logging.warning(
-                    f"Detected hotkey change for UID {uid}: {self.miner_hotkeys[uid]} -> {hotkey}"
-                )
-                changed_uids.append(uid)
-
-        # Update hotkeys
-        self.miner_hotkeys = new_hotkeys
-
-        # Update reverse mapping
-        self.hotkey_to_uid = {hotkey: uid for uid, hotkey in self.miner_hotkeys.items()}
-
-        # bt.logging.info(
-        #     f"Updated hotkey_to_uid mapping with {len(self.hotkey_to_uid)} entries"
-        # )
-        # bt.logging.debug(f"Current miner_hotkeys: {self.miner_hotkeys}")
-        # bt.logging.debug(f"Current hotkey_to_uid mapping: {self.hotkey_to_uid}")
-
-        return changed_uids
-
-    def update_miner_status(self, metagraph):
-        """Update miner online status
-
-        Args:
-            metagraph: Metagraph object, used to get miner online status
-        """
-        online_count = 0
-        for uid, axon in enumerate(metagraph.axons):
-            is_online = axon.is_serving
-            self.miner_online[uid] = is_online
-            if is_online:
-                online_count += 1
-
-        bt.logging.info(
-            f"Update miner online status complete, {online_count}/{len(metagraph.axons)} miners online"
-        )
 
     def record_score(self, hotkey, task_id, score):
         """Record the score, convert the hotkey to UID, and call add_score.
@@ -497,11 +409,10 @@ class MinerScoreManager:
         uids_to_calculate = (
             active_uids if active_uids is not None else list(self.miner_hotkeys.keys())
         )
-
         for uid in uids_to_calculate:
-            # If miner not online, score set to 0
-            if not self.miner_online.get(uid, False):
+            if uid not in self.miner_online:
                 weights[uid] = 0
+                bt.logging.info(f"UID {uid} not online, skipping")
                 continue
 
             # Calculate historical average score
@@ -511,21 +422,26 @@ class MinerScoreManager:
 
             # Calculate task average score
             task_avg = 0
+            task_count = 0
             if uid in self.task_scores and self.task_scores[uid]:
                 task_avg = self.safe_mean_score(self.task_scores[uid])
+                task_count = len(self.task_scores[uid])
 
             # Calculate final score
             if history_avg == 0 and task_avg == 0:
                 weights[uid] = 0
             else:
                 bt.logging.debug(
-                    f"UID {uid} - History: {history_avg:.4f}, Task: {task_avg:.4f}"
+                    f"UID {uid} - History: {history_avg:.4f}, Task: {task_avg:.4f}, Task Count: {task_count}"
                 )
 
             # Calculate weighted score - simplified condition check
             history_component = history_avg * self.history_weight
             current_component = task_avg * self.current_weight
             weights[uid] = history_component + current_component
+
+            if task_count < 3:
+                weights[uid] *= 0.1
 
         return weights
 
@@ -724,39 +640,3 @@ class MinerScoreManager:
         )
 
         return (history_count, current_count)
-
-    def get_available_miners(self, metagraph, self_uid, vpermit_tao_limit=None):
-        """Get available miner UID list
-
-        Args:
-            metagraph: Metagraph object
-            self_uid: Own UID
-            vpermit_tao_limit: Optional, validator weight limit
-
-        Returns:
-            List[int]: Available miner UID list
-        """
-        available_uids = []
-
-        # Update miner online status
-        self.update_miner_status(metagraph)
-
-        for uid in range(len(metagraph.hotkeys)):
-            # Skip self
-            if uid == self_uid:
-                continue
-
-            # Filter out offline miners
-            if not self.miner_online.get(uid, False):
-                continue
-
-            # Filter out miners with too high validator weight
-            if hasattr(metagraph, "validator_permit") and vpermit_tao_limit is not None:
-                if metagraph.validator_permit[uid]:
-                    if metagraph.S[uid] > vpermit_tao_limit:
-                        continue
-
-            available_uids.append(uid)
-
-        bt.logging.info(f"Retrieved {len(available_uids)} available miners")
-        return available_uids

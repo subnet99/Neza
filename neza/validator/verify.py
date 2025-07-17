@@ -25,14 +25,12 @@ class VideoVerifier:
     # Class variables for model caching
     _model_instance = None
     _device = None
-    _comfy_api = ComfyAPI()
 
     def __init__(self, validator):
         """Initialize video verifier"""
         self.model, self.device = self._get_model()
         self.validator = validator
-        if VideoVerifier._comfy_api is None:
-            VideoVerifier._comfy_api = ComfyAPI()
+        self.comfy_api = ComfyAPI(validator.validator_config.comfy_servers, True)
 
     @classmethod
     def _get_model(cls):
@@ -45,7 +43,9 @@ class VideoVerifier:
             cls._model_instance.to(cls._device)
         return cls._model_instance, cls._device
 
-    async def verify_task(self, task_id, complete_workflow, completion_time=None):
+    async def verify_task(
+        self, task_id, complete_workflow, completion_time=None, worker_id=None
+    ):
         """
         Complete verification flow: execute ComfyUI workflow, download miner video, compare similarity
 
@@ -53,6 +53,7 @@ class VideoVerifier:
             task_id: Task ID
             complete_workflow: Complete workflow configuration
             completion_time: Task completion time in seconds
+            worker_id: Worker ID for server selection
 
         Returns:
             tuple: (score, verification result dictionary)
@@ -82,7 +83,7 @@ class VideoVerifier:
 
             # Execute workflow to get filename and validator execution time
             output_filename, validator_execution_time, server_info = (
-                self.run_comfy_workflow(complete_workflow)
+                self.run_comfy_workflow(complete_workflow, task_id, worker_id)
             )
 
             if not output_filename:
@@ -152,13 +153,13 @@ class VideoVerifier:
             bt.logging.error(traceback.format_exc())
             return 0.0, {"error": str(e)}
 
-    def run_comfy_workflow(self, complete_workflow):
+    def run_comfy_workflow(self, complete_workflow, task_id=None, worker_id=None):
         """
         Run ComfyUI workflow
 
         Args:
             complete_workflow: Complete workflow configuration
-
+            worker_id: Worker ID for server selection
         Returns:
             tuple: (output_filename, execution_time, server_info) where output_filename is the generated file,
                   execution_time is in seconds, and server_info contains host and port information
@@ -195,7 +196,9 @@ class VideoVerifier:
 
             # Use ComfyAPI class to execute workflow
             success, output_filename, server_info = (
-                VideoVerifier._comfy_api.execute_comfy_workflow(complete_workflow)
+                self.comfy_api.execute_comfy_workflow(
+                    complete_workflow, task_id, worker_id
+                )
             )
 
             execution_time = time.time() - start_time
@@ -247,7 +250,7 @@ class VideoVerifier:
                 filename = os.path.basename(output_filename)
                 video_url = f"{comfy_url}/view?filename={filename}&type=output"
 
-                bt.logging.info(f"Verifying output file accessibility: {video_url}")
+                # bt.logging.info(f"Verifying output file accessibility: {video_url}")
 
                 # Check if file is accessible
                 try:

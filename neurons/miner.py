@@ -16,6 +16,7 @@ from neza.api.comfy_api import ComfyAPI
 from neza.base.miner import BaseMinerNeuron
 
 from neza.utils.http import http_get_request_sync, http_put_request_sync
+from neza.utils.tools import _parse_env_servers
 
 import traceback
 
@@ -33,9 +34,9 @@ class VideoMiner(BaseMinerNeuron):
 
     def __init__(self, config=None):
         super(VideoMiner, self).__init__(config=config)
-
         # Initialize ComfyUI instance
-        self.comfy_api = ComfyAPI()
+        servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
+        self.comfy_api = ComfyAPI(servers, clear_queue=False)
 
         # Task queue and status management
         self.task_queue = PriorityQueue()  # Priority queue

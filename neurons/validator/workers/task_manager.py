@@ -486,7 +486,7 @@ class TaskManager:
         """
         # Get max tasks from config
         max_tasks = self.validator.validator_config.miner_selection.get(
-            "generate_max_tasks", 2
+            "generate_max_tasks", 3
         )
 
         # Count miners with capacity
@@ -1496,3 +1496,37 @@ class TaskManager:
             bt.logging.error(f"Error adding task: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return None
+
+    def _handle_hotkey_change(self, old_hotkey, new_hotkey):
+        """
+        Updates sended_miners when a hotkey changes
+
+        Args:
+            old_hotkey: Previous hotkey
+            new_hotkey: New hotkey
+        """
+        try:
+            if old_hotkey in self.sended_miners:
+                min_count = (
+                    min(list(self.sended_miners.values())) if self.sended_miners else 0
+                )
+
+                self.sended_miners[new_hotkey] = max(0, min_count - 1)
+                if old_hotkey in self.sended_miners:
+                    del self.sended_miners[old_hotkey]
+
+                bt.logging.info(
+                    f"Updated sended_miners for changed hotkey: {old_hotkey[:10]}... -> {new_hotkey[:10]}... "
+                    f"Set to {self.sended_miners[new_hotkey]} (min count: {min_count})"
+                )
+            else:
+                self.sended_miners[new_hotkey] = 0
+                bt.logging.info(
+                    f"Set sended_miners count for new hotkey {new_hotkey[:10]}... to 0"
+                )
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error updating sended_miners for changed hotkey: {str(e)}"
+            )
+            bt.logging.error(traceback.format_exc())
