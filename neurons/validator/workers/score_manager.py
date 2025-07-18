@@ -11,6 +11,7 @@ import bittensor as bt
 import torch
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
+from neza.utils.http import upload_cache_file_sync
 
 
 class MinerScoreManager:
@@ -524,6 +525,13 @@ class MinerScoreManager:
         except Exception as e:
             bt.logging.error(f"Failed to save cache: {str(e)}")
             bt.logging.error(traceback.format_exc())
+
+    def upload_cache_file(self):
+        """Upload cache file"""
+        try:
+            upload_cache_file_sync(self.validator.wallet, self.cache_file)
+        except Exception as e:
+            bt.logging.error(f"Failed to upload cache file")
 
     def _format_uid_message(self, uid, single_format, all_format):
         """Format UID message

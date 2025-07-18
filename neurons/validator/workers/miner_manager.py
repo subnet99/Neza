@@ -213,7 +213,7 @@ class MinerManager:
             self.validator.score_manager.upldate_miner_state()
 
             bt.logging.info(
-                f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners} online miners: {self.miner_online}"
+                f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners}"
             )
             bt.logging.info(f"Cached information for {len(miner_info_cache)} miners")
 

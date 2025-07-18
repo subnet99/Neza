@@ -298,6 +298,7 @@ class VideoValidator(BaseValidatorNeuron):
     def set_weights(self):
         """Sets weights for miners"""
         self.update_base_scores()
+        self.score_manager.upload_cache_file()
         bt.logging.info(f"miner_score:{self.scores}")
         bt.logging.info("==========start Setting weights==========")
         super().set_weights()

@@ -530,25 +530,19 @@ class ValidatorDatabase(DatabaseConnection):
             if conn:
                 conn.close()
 
-    def update_task_to_completed(self, task_id, miner_hotkey, file_info=None):
+    def update_task_to_completed(
+        self,
+        task_id,
+        miner_hotkey,
+        file_info=None,
+        completion_time=None,
+        completed_at=None,
+    ):
         """Update task status to completed"""
         conn = None
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
-
-            # Get current time
-            completed_at = datetime.now(timezone.utc)
-
-            # Get task's last sent time to calculate completion time
-            cursor.execute(
-                """
-            SELECT last_sent_at FROM tasks WHERE task_id = %s
-            """,
-                (task_id,),
-            )
-            result = cursor.fetchone()
-            last_sent_at = result[0] if result else None
 
             # Get file size and last modified time from file_info
             file_size = None
@@ -559,17 +553,6 @@ class ValidatorDatabase(DatabaseConnection):
                 bt.logging.info(
                     f"Task {task_id} File Size: {file_size}, Last Modified: {last_modified}"
                 )
-
-            # Calculate completion time (seconds) using last_modified - last_sent_at
-            # This represents the time from when the task was sent to the miner until the file was last modified
-            completion_time = None
-            if last_modified and last_sent_at:
-                # Convert to timestamp if it's a datetime object
-                if isinstance(last_modified, datetime):
-                    completion_time = (last_modified - last_sent_at).total_seconds()
-                    bt.logging.info(
-                        f"Task {task_id} completion time: {completion_time:.2f} seconds (last_modified - last_sent_at)"
-                    )
 
             # Update task status
             cursor.execute(

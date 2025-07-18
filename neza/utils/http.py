@@ -338,6 +338,148 @@ async def upload_task_result(
         bt.logging.error(f"Error uploading task result: {str(e)}")
 
 
+async def upload_miner_completion(
+    task_id,
+    validator_wallet,
+    task_details,
+):
+    """
+    Upload miner completion to server
+
+    Args:
+        task_id: Task ID
+        validator_wallet: Validator wallet
+        task_details: Task details containing miner_hotkey and completion_time
+    """
+    try:
+        # Get API URL from environment variables
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return
+
+        # Get current timestamp
+        timestamp = int(time.time())
+        bt.logging.debug(
+            f"Using timestamp: {timestamp}, formatted time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}"
+        )
+
+        body = {
+            "task_id": task_id,
+            "validator_hotkey": validator_wallet.hotkey.ss58_address,
+            "miner_hotkey": task_details["miner_hotkey"],
+            "model": "Wan 2.1",
+            "resolution": "512 x 512",
+            "duration": 3,
+            "processing_time": task_details["completion_time"],
+            "frame_rate": 23,
+            "task_detail": (
+                json.loads(json.dumps(task_details, default=str))
+                if task_details
+                else {}
+            ),
+            "timestamp": timestamp,
+        }
+
+        # Generate signature message
+        exclude_fields = ["validator_signature"]
+        message = generate_signature_message(body, exclude_fields)
+        # bt.logging.debug(f"Generated signature message: {message}")
+
+        # Sign with wallet
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        # bt.logging.debug(f"Generated signature: {signature}")
+
+        body["validator_signature"] = signature
+
+        api_url = f"{owner_host}/v1/validator/record-miner-completion"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        bt.logging.info(f"Uploading miner completion: {api_url}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=body, headers=headers, timeout=30
+            ) as response:
+                if response.status == 204:
+                    bt.logging.info("Miner completion uploaded successfully")
+                else:
+                    error_text = await response.text()
+                    bt.logging.error(
+                        f"Failed to upload miner completion: status code {response.status}, error: {error_text}"
+                    )
+    except Exception as e:
+        bt.logging.error(f"Error uploading miner completion: {str(e)}")
+
+
+def upload_cache_file_sync(validator_wallet, cache_file_path=None):
+    """
+    Upload cache file to server
+
+    Args:
+        validator_wallet: Validator wallet
+        cache_file_path: Path to the cache file
+
+    Returns:
+        dict: Response data, or None if failed
+    """
+    try:
+        # Get API URL from environment variables
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return None
+
+        # Use default cache file path if not provided
+        if cache_file_path is None:
+            return None
+
+        # Read cache file if it exists
+        cache_data = {}
+        if os.path.exists(cache_file_path):
+            try:
+                with open(cache_file_path, "r") as f:
+                    cache_data = json.load(f)
+            except Exception as e:
+                bt.logging.error(f"Error reading cache file")
+                bt.logging.error(traceback.format_exc())
+                return None
+        else:
+            bt.logging.warning(f"Cache file not found")
+            return None
+
+        # Prepare request body
+        body = cache_data
+
+        body["timestamp"] = int(time.time())
+        body["validator_hotkey"] = validator_wallet.hotkey.ss58_address
+
+        # Generate signature message
+        exclude_fields = ["validator_signature"]
+        message = generate_signature_message(body, exclude_fields)
+        # Sign with wallet
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        # Add signature to request body
+        body["validator_signature"] = signature
+
+        api_url = f"{owner_host}/v1/validator/submit-score"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        response = requests.post(api_url, json=body, headers=headers, timeout=30)
+
+        if response.status_code == 204:
+            bt.logging.info("Cache file uploaded successfully")
+            return response.json()
+        else:
+            bt.logging.error(
+                f"Failed to upload cache file: status code {response.status_code}"
+            )
+            return None
+
+    except Exception as e:
+        bt.logging.error(f"Error uploading cache file")
+        return None
+
+
 async def http_put_request(
     url, data=None, headers=None, timeout=30, json_response=False
 ):

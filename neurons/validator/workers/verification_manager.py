@@ -4,7 +4,7 @@ import asyncio
 import traceback
 import json
 import queue
-from neza.utils.http import upload_task_result
+from neza.utils.http import upload_task_result, upload_miner_completion
 
 import bittensor as bt
 
@@ -926,4 +926,26 @@ class VerificationManager:
                 )
             except Exception as e:
                 bt.logging.error(f"Failed to upload task result to dashboard: {str(e)}")
+                bt.logging.error(traceback.format_exc())
+
+    async def upload_miner_completed_task(self, task_id):
+        # Get task details for upload
+        task_details = await self.validator.task_manager._db_op(
+            self.validator.task_manager.db.get_task, task_id=task_id
+        )
+
+        # Upload miner completion to owner
+        if task_details:
+            try:
+                # Upload miner completion
+                await upload_miner_completion(
+                    task_id, self.validator.wallet, task_details
+                )
+                bt.logging.info(
+                    f"Miner completion for {task_id} uploaded to dashboard successfully"
+                )
+            except Exception as e:
+                bt.logging.error(
+                    f"Failed to upload miner completion to dashboard: {str(e)}"
+                )
                 bt.logging.error(traceback.format_exc())

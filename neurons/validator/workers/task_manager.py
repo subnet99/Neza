@@ -1113,12 +1113,28 @@ class TaskManager:
                             task_id, video_url, "miner"
                         )
 
+                        completion_time = None
+                        last_sent_at = task.get("last_sent_at")
+                        if last_modified and last_sent_at:
+                            completion_time = (
+                                last_modified - last_sent_at
+                            ).total_seconds()
+                            bt.logging.info(
+                                f"Task {task_id} completion time: {completion_time:.2f} seconds (last_modified - last_sent_at)"
+                            )
+
                         # Update task in database
                         await self._db_op(
                             self.db.update_task_to_completed,
                             task_id=task_id,
                             miner_hotkey=miner_hotkey,
                             file_info=file_info,
+                            completion_time=completion_time,
+                            completed_at=datetime.now(timezone.utc),
+                        )
+
+                        await self.validator.verification_manager.upload_miner_completed_task(
+                            task_id
                         )
 
                         completed_count += 1

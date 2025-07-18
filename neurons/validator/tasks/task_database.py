@@ -705,7 +705,12 @@ class TaskDatabase:
             return False
 
     async def update_task_to_completed(
-        self, task_id: str, miner_hotkey: str, file_info: Dict[str, Any] = None
+        self,
+        task_id: str,
+        miner_hotkey: str,
+        file_info: Dict[str, Any] = None,
+        completion_time: float = None,
+        completed_at: datetime = None,
     ) -> bool:
         """
         Update task status to completed
@@ -723,6 +728,8 @@ class TaskDatabase:
                 task_id=task_id,
                 miner_hotkey=miner_hotkey,
                 file_info=file_info,
+                completion_time=completion_time,
+                completed_at=completed_at,
             )
         except Exception as e:
             bt.logging.error(f"Error updating task to completed: {str(e)}")
