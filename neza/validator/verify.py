@@ -11,6 +11,8 @@ import shutil
 import requests
 from urllib.parse import urlparse
 import time
+import threading
+import queue
 from neza.api.comfy_api import ComfyAPI
 from neza.utils.misc import copy_audio_wav
 import traceback
@@ -25,12 +27,68 @@ class VideoVerifier:
     # Class variables for model caching
     _model_instance = None
     _device = None
+    _verification_queue = queue.Queue()
+    _verification_lock = threading.Lock()
+    _verification_thread = None
+    _stop_thread = False
 
     def __init__(self, validator):
         """Initialize video verifier"""
         self.model, self.device = self._get_model()
         self.validator = validator
         self.comfy_api = ComfyAPI(validator.validator_config.comfy_servers, True)
+
+        if (
+            VideoVerifier._verification_thread is None
+            or not VideoVerifier._verification_thread.is_alive()
+        ):
+            VideoVerifier._stop_thread = False
+            VideoVerifier._verification_thread = threading.Thread(
+                target=self._process_verification_queue,
+                daemon=True,
+                name="video_verification_queue",
+            )
+            VideoVerifier._verification_thread.start()
+            bt.logging.info("Started video verification queue processor thread")
+
+    def _process_verification_queue(self):
+        """Process verification queue thread function"""
+        bt.logging.info("Video verification queue processor started")
+        while not VideoVerifier._stop_thread:
+            try:
+                # Get verification task from queue, with timeout of 5 seconds
+                try:
+                    task = VideoVerifier._verification_queue.get(timeout=5)
+                except queue.Empty:
+                    continue
+
+                # Unpack task parameters
+                args, kwargs, result_container = task
+
+                # Execute actual verification
+                try:
+                    with VideoVerifier._verification_lock:
+                        bt.logging.info("Processing video verification task")
+                        result = self._verify_videos_impl(*args, **kwargs)
+                        result_container["result"] = result
+                        result_container["error"] = None
+                except Exception as e:
+                    bt.logging.error(f"Error in verification queue processor: {str(e)}")
+                    bt.logging.error(traceback.format_exc())
+                    result_container["result"] = (0.0, {"error": str(e)})
+                    result_container["error"] = e
+                finally:
+                    # Mark task as completed
+                    result_container["completed"] = True
+                    # Notify queue that task is done
+                    VideoVerifier._verification_queue.task_done()
+
+            except Exception as e:
+                bt.logging.error(f"Error in verification queue processor: {str(e)}")
+                bt.logging.error(traceback.format_exc())
+                time.sleep(1)  # Avoid error loop too fast
+
+        bt.logging.info("Video verification queue processor stopped")
 
     @classmethod
     def _get_model(cls):
@@ -281,7 +339,60 @@ class VideoVerifier:
         completion_time=None,
     ):
         """
-        Verify similarity between two videos using ImageBind model
+        Process video verification requests through queue, ensuring only one verification task is executed at a time
+
+        Args:
+            validator_video_path: Path to validator video
+            miner_video_path: Path to miner video
+            validator_execution_time: Validator's execution time in seconds
+            completion_time: Task completion time in seconds
+
+        Returns:
+            tuple: (similarity score, metrics dictionary)
+        """
+        # Create result container
+        result_container = {"completed": False, "result": None, "error": None}
+
+        # Add task to queue
+        bt.logging.info("Adding video verification task to queue")
+        args = (
+            validator_video_path,
+            miner_video_path,
+            validator_execution_time,
+            completion_time,
+        )
+        VideoVerifier._verification_queue.put((args, {}, result_container))
+
+        # Wait for task to complete
+        start_time = time.time()
+        timeout = 600  # 10 minutes timeout
+        while not result_container["completed"] and time.time() - start_time < timeout:
+            time.sleep(0.5)
+
+        # Check if timeout
+        if not result_container["completed"]:
+            bt.logging.error(f"Video verification timed out after {timeout} seconds")
+            return 0.0, {"error": "Verification timed out"}
+
+        # Check if there is an error
+        if result_container["error"]:
+            bt.logging.error(
+                f"Video verification failed: {str(result_container['error'])}"
+            )
+            return 0.0, {"error": str(result_container["error"])}
+
+        # Return result
+        return result_container["result"]
+
+    def _verify_videos_impl(
+        self,
+        validator_video_path,
+        miner_video_path,
+        validator_execution_time=None,
+        completion_time=None,
+    ):
+        """
+            Internal method to actually execute video verification, called by queue processor
 
         Args:
             validator_video_path: Path to validator video
@@ -474,3 +585,13 @@ class VideoVerifier:
             bt.logging.error(f"Error verifying text-video similarity: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return 0.0, {"error": str(e)}
+
+    def __del__(self):
+        """Clean up resources"""
+        # Stop verification queue processing thread
+        if (
+            VideoVerifier._verification_thread
+            and VideoVerifier._verification_thread.is_alive()
+        ):
+            VideoVerifier._stop_thread = True
+            # Don't wait for thread to finish, let it finish naturally

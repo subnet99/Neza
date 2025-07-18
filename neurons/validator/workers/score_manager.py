@@ -409,14 +409,7 @@ class MinerScoreManager:
         uids_to_calculate = (
             active_uids if active_uids is not None else list(self.miner_hotkeys.keys())
         )
-        bt.logging.info(f"online miners: {self.miner_online}")
         for uid in uids_to_calculate:
-            if uid not in self.miner_online:
-                weights[uid] = 0
-                bt.logging.info(f"UID {uid} not online, skipping")
-                continue
-
-            # Calculate historical average score
             history_avg = 0
             if uid in self.historical_scores and self.historical_scores[uid]:
                 history_avg = self.safe_mean_score(self.historical_scores[uid])
