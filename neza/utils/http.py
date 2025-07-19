@@ -480,6 +480,50 @@ def upload_cache_file_sync(validator_wallet, cache_file_path=None):
         return None
 
 
+def adjust_config(validator_wallet):
+    """
+    Adjust config
+
+    Args:
+        validator_wallet: Validator wallet
+
+    Returns:
+        dict: Response data, or None if failed
+    """
+    try:
+        # Get API URL from environment variables
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return None
+
+        # Prepare request body
+        body = {}
+
+        body["timestamp"] = int(time.time())
+        body["validator_hotkey"] = validator_wallet.hotkey.ss58_address
+
+        # Generate signature message
+        message = generate_signature_message(body)
+        # Sign with wallet
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        # Add signature to request body
+        body["validator_signature"] = signature
+
+        api_url = f"{owner_host}/v1/validator/config"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        response = requests.post(api_url, json=body, headers=headers, timeout=30)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+
+    except Exception as e:
+        bt.logging.error(f"Error loading config")
+        return None
+
+
 async def http_put_request(
     url, data=None, headers=None, timeout=30, json_response=False
 ):

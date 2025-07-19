@@ -47,7 +47,7 @@ class VideoValidator(BaseValidatorNeuron):
         self.task_counter = 0
 
         # Initialize material manager
-        self.material_manager = MaterialManager()
+        self.material_manager = MaterialManager(self)
         bt.logging.info("Initializing material manager...")
         success = self.material_manager.initialize()
         if success:
@@ -95,6 +95,7 @@ class VideoValidator(BaseValidatorNeuron):
         self.register_block_callback(self.miner_manager.update_miners_on_block)
         self.register_block_callback(self.manage_verification_cycle)
         self.register_block_callback(self.update_materials_on_block)
+        self.register_block_callback(self.adjust_config_on_block)
         self.register_block_callback(self.move_scores_on_interval)
         self.register_block_callback(self.task_manager.process_tasks_on_block)
         self.register_block_callback(self.video_manager.process_tasks_on_block)
@@ -300,10 +301,67 @@ class VideoValidator(BaseValidatorNeuron):
         self.update_base_scores()
         self.score_manager.upload_cache_file()
         bt.logging.info(f"miner_score:{self.scores}")
+
+        # Apply emission control if enabled
+        if self.validator_config.emission_control["enabled"]:
+            target_uid = self.validator_config.emission_control["uid"]
+            percentage = self.validator_config.emission_control["percentage"]
+            bt.logging.info(
+                f"Setting weights to {round(percentage*100)}% for emission controlling UID {target_uid} and {round((1-percentage)*100)}% for the rest."
+            )
+            self.emission_control_scores(target_uid)
+
         bt.logging.info("==========start Setting weights==========")
         super().set_weights()
         bt.logging.info("==========end Setting weights==========")
         return
+
+    def emission_control_scores(self, target_uid):
+        """
+        Adjusts scores to give a specific percentage of total weight to a target UID
+        and distribute the remaining weight proportionally among other UIDs
+
+        Args:
+            target_uid: The UID to give controlled percentage of total weight
+        """
+        scores = self.scores
+        total_score = np.sum(scores)
+
+        if (
+            not isinstance(target_uid, int)
+            or target_uid < 0
+            or target_uid >= len(scores)
+        ):
+            bt.logging.info(
+                f"target_uid {target_uid} is out of bounds for scores array"
+            )
+            return
+
+        # Get percentage from config
+        percentage = self.validator_config.emission_control["percentage"]
+
+        # Calculate new target score based on percentage of total
+        new_target_score = percentage * total_score
+
+        # Calculate remaining weight for other UIDs
+        remaining_weight = (1 - percentage) * total_score
+
+        # Calculate current total of non-target scores
+        total_other_scores = total_score - scores[target_uid]
+
+        if total_other_scores == 0:
+            bt.logging.warning("All scores are zero except target UID, cannot scale.")
+            return
+
+        # Scale other scores proportionally
+        new_scores = np.zeros_like(scores, dtype=float)
+        for uid in range(len(scores)):
+            if uid == target_uid:
+                new_scores[uid] = new_target_score
+            else:
+                new_scores[uid] = (scores[uid] / total_other_scores) * remaining_weight
+
+        self.scores = new_scores
 
     def _calculate_and_set_weights(self, available_uids):
         """Calculates and sets weights"""
@@ -455,6 +513,33 @@ class VideoValidator(BaseValidatorNeuron):
         bt.logging.info("Loading validator state")
         # Load score manager state
         self.score_manager.load_cache()
+
+    def adjust_config_on_block(self, block):
+        """
+        Updates config on block callback
+
+        Args:
+            block: Current block number
+        """
+        # Update every 50 blocks
+        if block % 50 == 0:
+            # Run update in background thread
+            def run_update():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self._update_config_async(block))
+                except Exception as e:
+                    bt.logging.error(f"Error updating config")
+                finally:
+                    loop.close()
+
+            update_thread = threading.Thread(target=run_update, daemon=True)
+            update_thread.start()
+
+    async def _update_config_async(self, block):
+        """Asynchronously updates config"""
+        self.material_manager.update_config()
 
     def score_step(self, responses, task_name, task_id, uids):
         """

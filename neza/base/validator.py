@@ -103,7 +103,6 @@ class BaseValidatorNeuron(BaseNeuron):
 
         except Exception as e:
             bt.logging.error(f"Error setting weights in block callback: {str(e)}")
-            bt.logging.error(traceback.format_exc())
 
     def serve_axon(self):
         """Serve axon to enable external connections."""

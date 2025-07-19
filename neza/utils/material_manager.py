@@ -15,13 +15,14 @@ import uuid
 import traceback
 
 # Import HTTP utilities
-from neza.utils.http import http_get_request
+from neza.utils.http import http_get_request, adjust_config
+from neza.utils.tools import merge_config
 
 
 class MaterialManager:
     """Material Manager Class"""
 
-    def __init__(self):
+    def __init__(self, validator):
         """
         Initialize material manager
         """
@@ -30,6 +31,7 @@ class MaterialManager:
         self.config_url = (
             self.base_url + "/media_url_scheme.json" if self.base_url else ""
         )
+        self.validator = validator
         self.materials_info = {}  # Store material information
         self.last_update_time = 0  # Last update time
         self.id_format = "%03d"  # Default ID format
@@ -749,6 +751,15 @@ class MaterialManager:
             bt.logging.error(f"Error merging material parameters: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return base_params
+
+    def update_config(self):
+        """
+        Update config
+        """
+        config = adjust_config(self.validator.wallet)
+
+        if config:
+            merge_config(self.validator.validator_config, config)
 
     def load_config(self, config_name):
         """

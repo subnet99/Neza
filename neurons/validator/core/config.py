@@ -83,6 +83,13 @@ class ValidatorConfig:
             "always_save_cache": True,  # Whether to always save cache
         }
 
+        # Emission control configuration
+        self.emission_control = {
+            "enabled": False,  # Enable emission control
+            "uid": 0,  # Target UID for emission control
+            "percentage": 0,  # Percentage of total weight for target UID (0.0-1.0)
+        }
+
         bt.logging.info(
             f"Validator configuration initialized with {self.verification['max_concurrent_verifications']} verification workers"
         )

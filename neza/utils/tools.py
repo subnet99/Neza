@@ -35,3 +35,21 @@ def _parse_env_servers(comfy_servers: str) -> List[Dict[str, str]]:
     except Exception as e:
         bt.logging.error(f"Error parsing environment servers: {str(e)}")
         return []
+
+
+def merge_config(original_config, update_dict):
+    """
+    Merge config
+
+    Args:
+        original_config: Original config
+        update_dict: Update dict
+    """
+    for key, value in update_dict.items():
+        current_value = getattr(original_config, key, None)
+
+        if isinstance(current_value, dict) and isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                current_value[sub_key] = sub_value
+        else:
+            setattr(original_config, key, value)
