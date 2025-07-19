@@ -236,6 +236,26 @@ class VerificationManager:
                 if worker_id in self.worker_status:
                     self.worker_status[worker_id]["last_activity"] = time.time()
 
+                if not self.verification_queue.empty():
+                    try:
+                        comfy_api = self.validator.verifier.comfy_api
+                        server = comfy_api.servers[worker_id]
+                        comfy_api._check_server_availability(server, clear_queue=False)
+                        comfy_available = server["available"]
+                        if not comfy_available:
+                            bt.logging.warning(
+                                f"Worker {worker_id}: ComfyUI server is unavailable, retry after waiting for 30 seconds"
+                            )
+                            await asyncio.sleep(30)
+                            continue
+                    except Exception as e:
+                        bt.logging.error(
+                            f"Error checking ComfyUI server availability: {str(e)}"
+                        )
+                        bt.logging.error(traceback.format_exc())
+                        await asyncio.sleep(30)
+                        continue
+
                 # Get next task from the thread-safe queue with timeout
                 # Using blocking get with timeout instead of async to work with thread-safe queue
                 try:

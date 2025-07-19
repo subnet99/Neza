@@ -56,7 +56,7 @@ class ComfyAPI:
             self._check_server_availability(server, clear_queue)
 
     def _check_server_availability(
-        self, server: Dict[str, Any], clear_queue: False
+        self, server: Dict[str, Any], clear_queue: bool = False
     ) -> None:
         """
         Check if a ComfyUI server is available by attempting to connect to its queue API endpoint.
