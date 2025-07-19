@@ -180,7 +180,7 @@ class ComfyAPI:
 
     def get_video(
         self, server: Dict[str, Any], prompt_id: str, timeout: int = 1800
-    ) -> str:
+    ) -> Tuple[str, Optional[float]]:
         """
         Get video generation result using periodic polling of history instead of WebSocket events
 
@@ -217,13 +217,13 @@ class ComfyAPI:
                     time.sleep(poll_interval)
 
                 # Get history
-                history_result = self.get_history(server, prompt_id)
+                history_result, execution_time = self.get_history(server, prompt_id)
                 if history_result:
                     bt.logging.info(
                         f"Found result in history for prompt_id: {prompt_id} on attempt {attempt+1}/{max_attempts}"
                     )
                     server["task_results"][prompt_id] = history_result[0]
-                    return history_result[0]
+                    return history_result[0], execution_time
 
                 # Check if server is available
                 if not server["available"]:
@@ -246,28 +246,30 @@ class ComfyAPI:
             bt.logging.info(
                 f"Making final attempt to get history for prompt_id: {prompt_id}"
             )
-            history_result = self.get_history(server, prompt_id)
+            history_result, execution_time = self.get_history(server, prompt_id)
             if history_result:
                 bt.logging.info(
                     f"Found result in history on final attempt for prompt_id: {prompt_id}"
                 )
                 server["task_results"][prompt_id] = history_result[0]
-                return history_result[0]
+                return history_result[0], execution_time
         except Exception as e:
             bt.logging.error(f"Error in final history check: {str(e)}")
 
-        return ""
+        return "", None
 
-    def get_history(self, server: Dict[str, Any], prompt_id: str) -> List[str]:
+    def get_history(
+        self, server: Dict[str, Any], prompt_id: str
+    ) -> Tuple[List[str], Optional[float]]:
         """
-        Get video filenames from history
+        Get video filenames from history and extract execution time if available
 
         Args:
             server: Server configuration
             prompt_id: Prompt ID
 
         Returns:
-            List[str]: List of video filenames
+            Tuple[List[str], Optional[float]]: (List of video filenames, execution time in seconds if available)
         """
         try:
             # Ensure host doesn't include protocol prefix for HTTP requests
@@ -285,9 +287,37 @@ class ComfyAPI:
                 # Skip if history is None
                 if prompt_id not in response_data:
                     bt.logging.info(f"History is None for prompt_id: {prompt_id}")
-                    return []
+                    return [], None
 
                 history = response_data[prompt_id]
+
+                execution_time = None
+                if "status" in history and "messages" in history["status"]:
+                    messages = history["status"]["messages"]
+                    start_timestamp = None
+                    end_timestamp = None
+
+                    for msg in messages:
+                        if len(msg) >= 2:
+                            msg_type = msg[0]
+                            msg_data = msg[1]
+
+                            if (
+                                msg_type == "execution_start"
+                                and "timestamp" in msg_data
+                            ):
+                                start_timestamp = msg_data["timestamp"]
+                            elif (
+                                msg_type == "execution_success"
+                                and "timestamp" in msg_data
+                            ):
+                                end_timestamp = msg_data["timestamp"]
+
+                    if start_timestamp is not None and end_timestamp is not None:
+                        execution_time = (end_timestamp - start_timestamp) / 1000.0
+                        bt.logging.info(
+                            f"ComfyUI Execution time: {execution_time:.2f}s for prompt_id: {prompt_id}"
+                        )
 
                 # Extract all gif filenames
                 filenames = []
@@ -297,17 +327,17 @@ class ComfyAPI:
                         for gif in node_output["gifs"]:
                             filenames.append(gif["filename"])
 
-                return filenames
+                return filenames, execution_time
             else:
                 bt.logging.info(f"Failed to get history: {response.status_code}")
-                return []
+                return [], None
         except Exception as e:
             bt.logging.error(f"Failed to get history: {str(e)}")
-            return []
+            return [], None
 
     def execute_comfy_workflow(
         self, workflow: Dict[str, Any], task_id: str = None, worker_id: int = None
-    ) -> Tuple[bool, str, Dict[str, Any]]:
+    ) -> Tuple[bool, str, Dict[str, Any], Optional[float]]:
         """
         Execute ComfyUI workflow and return output filename
 
@@ -324,7 +354,7 @@ class ComfyAPI:
 
         if server is None:
             bt.logging.error("No available ComfyUI servers")
-            return False, "", None
+            return False, "", None, None
 
         # Double-check server availability
         if not server["available"]:
@@ -334,7 +364,7 @@ class ComfyAPI:
             self._check_server_availability(server)
             if not server["available"]:
                 bt.logging.error(f"Server ***:{server['port']} is still not available")
-                return False, "", None
+                return False, "", None, None
 
         try:
             # Ensure host doesn't include protocol prefix for HTTP requests
@@ -367,14 +397,14 @@ class ComfyAPI:
                     bt.logging.error(f"Response content: {response.text}")
                     # Mark server as unavailable if it returns an error
                     server["available"] = False
-                    return False, "", None
+                    return False, "", None, None
 
                 response_json = response.json()
                 if "prompt_id" not in response_json:
                     bt.logging.error(
                         f"Missing prompt_id in ComfyUI response: {response_json}"
                     )
-                    return False, "", None
+                    return False, "", None, None
 
                 prompt_id = response_json["prompt_id"]
                 bt.logging.info(
@@ -385,15 +415,15 @@ class ComfyAPI:
                 bt.logging.error(f"Error sending request to ComfyUI server: {str(e)}")
                 # Mark server as unavailable if there's a connection error
                 server["available"] = False
-                return False, "", None
+                return False, "", None, None
             except json.JSONDecodeError as e:
                 bt.logging.error(f"Error parsing ComfyUI response: {str(e)}")
                 bt.logging.error(f"Response content: {response.text}")
-                return False, "", None
+                return False, "", None, None
 
             # Get video result using polling
             bt.logging.info(f"Waiting for video result, prompt_id: {prompt_id}")
-            video_result = self.get_video(server, prompt_id)
+            video_result, execution_time = self.get_video(server, prompt_id)
 
             if not video_result:
                 bt.logging.error(
@@ -401,36 +431,39 @@ class ComfyAPI:
                 )
                 # Try to get from history one more time with increased timeout
                 bt.logging.info("Making final attempt to get result from history")
-                history_result = self.get_history(server, prompt_id)
+                history_result, comfy_execution_time = self.get_history(
+                    server, prompt_id
+                )
                 if history_result:
                     elapsed_time = time.time() - start_time
-                    bt.logging.info(
-                        f"Found result in history on final attempt, prompt_id: {prompt_id}, elapsed time: {elapsed_time:.2f}s"
-                    )
+                    if comfy_execution_time is not None:
+                        elapsed_time = comfy_execution_time
                     # Return server info
                     server_info = {"host": server["host"], "port": server["port"]}
-                    return True, history_result[0], server_info
+                    return True, history_result[0], server_info, comfy_execution_time
 
                 elapsed_time = time.time() - start_time
                 bt.logging.error(
                     f"Workflow execution failed after {elapsed_time:.2f}s, prompt_id: {prompt_id}"
                 )
-                return False, "", None
+                return False, "", None, None
 
             # Success
-            elapsed_time = time.time() - start_time
+            elapsed_time = (
+                execution_time if execution_time else (time.time() - start_time)
+            )
             bt.logging.info(
                 f"Workflow execution completed successfully in {elapsed_time:.2f}s, prompt_id: {prompt_id}"
             )
 
             # Return server info
             server_info = {"host": server["host"], "port": server["port"]}
-            return True, video_result, server_info
+            return True, video_result, server_info, execution_time
 
         except Exception as e:
             bt.logging.error(f"Error executing ComfyUI workflow: {str(e)}")
             bt.logging.error(traceback.format_exc())
-            return False, "", None
+            return False, "", None, None
 
     def execute_workflow(
         self, workflow: Dict[str, Any], task_id: str = None

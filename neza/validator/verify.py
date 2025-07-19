@@ -253,13 +253,17 @@ class VideoVerifier:
             )
 
             # Use ComfyAPI class to execute workflow
-            success, output_filename, server_info = (
+            success, output_filename, server_info, comfy_execution_time = (
                 self.comfy_api.execute_comfy_workflow(
                     complete_workflow, task_id, worker_id
                 )
             )
 
-            execution_time = time.time() - start_time
+            execution_time = (
+                comfy_execution_time
+                if comfy_execution_time
+                else (time.time() - start_time)
+            )
             bt.logging.info(
                 f"ComfyUI workflow execution completed in {execution_time:.2f} seconds"
             )
