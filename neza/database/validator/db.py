@@ -1706,49 +1706,74 @@ class ValidatorDatabase(DatabaseConnection):
             cursor = conn.cursor()
             now = datetime.now(timezone.utc)
 
-            # Reset miner data SQL
-            reset_miner_sql = """
-            UPDATE miners SET 
-                created_at = %s,
-                creation_block = %s,
-                completed_tasks = 0,
-                failed_tasks = 0,
-                avg_completion_time = 0,
-                avg_score = 0,
-                last_active = %s,
-                active_tasks = 0,
-                tasks_last_hour = 0
-            """
+            # Attempt to update existing records
+            cursor.execute(
+                "UPDATE miners SET last_active = %s WHERE hotkey = %s AND uid = %s",
+                (now, hotkey, uid),
+            )
 
-            # Check if uid exists
+            # Check if any records have been updated
+            if cursor.rowcount > 0:
+                # Successfully updated the record, indicating that the hotkey and uid match.
+                conn.commit()
+                return True
+
+            # If no records have been updated, check if the hotkey exists.
+            cursor.execute("SELECT uid FROM miners WHERE hotkey = %s", (hotkey,))
+            hotkey_record = cursor.fetchone()
+
+            if hotkey_record:
+                # The hotkey exists but the uid is different, update the uid and reset the data.
+                bt.logging.info(
+                    f"Miner {hotkey[:10]} UID changed from {hotkey_record[0]} to {uid}, resetting data"
+                )
+                cursor.execute(
+                    """
+                    UPDATE miners SET 
+                        uid = %s,
+                        created_at = %s,
+                        creation_block = %s,
+                        completed_tasks = 0,
+                        failed_tasks = 0,
+                        avg_completion_time = 0,
+                        avg_score = 0,
+                        last_active = %s,
+                        active_tasks = 0,
+                        tasks_last_hour = 0
+                    WHERE hotkey = %s
+                    """,
+                    (uid, now, current_block, now, hotkey),
+                )
+                conn.commit()
+                return True
+
+            # The hotkey does not exist, check if there are other records using the same uid.
             cursor.execute("SELECT hotkey FROM miners WHERE uid = %s", (uid,))
             uid_record = cursor.fetchone()
 
             if uid_record:
-                # uid exists
-                if uid_record[0] == hotkey:
-                    # hotkey same, only update activity time
-                    cursor.execute(
-                        "UPDATE miners SET last_active = %s WHERE uid = %s", (now, uid)
-                    )
-                else:
-                    # hotkey different, reset data
-                    cursor.execute(
-                        reset_miner_sql + ", hotkey = %s WHERE uid = %s",
-                        (now, current_block, now, hotkey, uid),
-                    )
-            else:
-                # uid doesn't exist, create new record
-                cursor.execute(
-                    """
+                # There are other hotkeys using the same uid, please delete the old record first.
+                old_hotkey = uid_record[0]
+                bt.logging.warning(
+                    f"UID {uid} reassigned from hotkey {old_hotkey[:10]} to {hotkey[:10]}, deleting old record"
+                )
+                cursor.execute("DELETE FROM miners WHERE uid = %s", (uid,))
+
+            # Create new record
+            bt.logging.info(
+                f"Creating new miner record for hotkey {hotkey[:10]} with UID {uid}"
+            )
+            cursor.execute(
+                """
                 INSERT INTO miners (hotkey, uid, created_at, last_active, creation_block)
                 VALUES (%s, %s, %s, %s, %s)
                 """,
-                    (hotkey, uid, now, now, current_block),
-                )
+                (hotkey, uid, now, now, current_block),
+            )
 
             conn.commit()
             return True
+
         except Exception as e:
             bt.logging.error(f"Error updating miner uid: {str(e)}")
             if conn:
