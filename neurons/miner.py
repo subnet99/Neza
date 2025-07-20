@@ -301,7 +301,7 @@ class VideoMiner(BaseMinerNeuron):
             upload_url = task_info.get("upload_url", "")
 
             # Execute ComfyUI workflow
-            success, output_file, server_info = self.comfy_api.execute_workflow(
+            success, output_file, server_info, _ = self.comfy_api.execute_workflow(
                 workflow_params, task_id
             )
 
