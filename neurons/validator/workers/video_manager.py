@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from datetime import datetime
 import bittensor as bt
 import asyncio
+from datetime import timedelta
 
 
 class VideoManager:
@@ -41,7 +42,7 @@ class VideoManager:
             tuple: (success, video_path) where success is a boolean and video_path is the path to the downloaded video
         """
         # Get target path based on video type
-        target_path = self.get_video_cache_paths(task_id, video_type)
+        target_path = self.get_video_cache_paths(task_id, video_type, False)
 
         # Check if video already exists
         if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
@@ -76,7 +77,7 @@ class VideoManager:
             )
             return False, target_path
 
-    def get_video_cache_paths(self, task_id, video_type=None):
+    def get_video_cache_paths(self, task_id, video_type=None, is_find=False):
         """
         Generate video cache paths
 
@@ -90,16 +91,10 @@ class VideoManager:
             If video_type is specified:
                 str: Path to the specified video type
         """
-        # Get current date as folder name
-        date_str = datetime.now().strftime("%Y%m%d")
-
-        # Create cache directory structure: temp/video_cache/date/task_id/
-        date_dir = os.path.join(self.video_cache_dir, date_str)
-        task_dir = os.path.join(date_dir, task_id)
 
         # Generate miner and validator video paths
-        miner_video_path = os.path.join(task_dir, "miner.mp4")
-        validator_video_path = os.path.join(task_dir, "validator.mp4")
+        miner_video_path = self.find_video_file(task_id, video_type, is_find, 1)
+        validator_video_path = self.find_video_file(task_id, video_type, is_find, 1)
 
         # Return specific path if video_type is specified
         if video_type == "miner":
@@ -108,14 +103,37 @@ class VideoManager:
             return validator_video_path
 
         # Return all paths by default
-        return task_dir, miner_video_path, validator_video_path
+        return miner_video_path, validator_video_path
 
-    def clean_old_video_cache(self, days=2):
+    def find_video_file(self, task_id, video_type, is_find=False, days_to_back=1):
+        """
+        Find video file in cache directory
+        """
+        date_str = datetime.now().strftime("%Y%m%d")
+        date_dir = os.path.join(self.video_cache_dir, date_str)
+        task_dir = os.path.join(date_dir, task_id)
+        today_video_path = os.path.join(task_dir, f"{video_type}.mp4")
+
+        if not is_find:
+            return today_video_path
+
+        if os.path.exists(today_video_path) and os.path.getsize(today_video_path) > 0:
+            return today_video_path
+        else:
+            yesterday_str = (datetime.now() - timedelta(days=days_to_back)).strftime(
+                "%Y%m%d"
+            )
+            yesterday_dir = os.path.join(self.video_cache_dir, yesterday_str)
+            yesterday_task_dir = os.path.join(yesterday_dir, task_id)
+            yesterday_video_path = os.path.join(yesterday_task_dir, f"{video_type}.mp4")
+            return yesterday_video_path
+
+    def clean_old_video_cache(self, days=7):
         """
         Clean video cache older than specified days
 
         Args:
-            days: Number of days to keep, default is 2
+            days: Number of days to keep, default is 7
         """
         try:
             # Get base cache directory

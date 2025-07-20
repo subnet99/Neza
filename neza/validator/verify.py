@@ -176,7 +176,7 @@ class VideoVerifier:
 
             # 2. Get miner video path from video manager
             miner_video_path = self.validator.video_manager.get_video_cache_paths(
-                task_id, "miner"
+                task_id, "miner", True
             )
 
             # Check if miner video exists
@@ -476,9 +476,9 @@ class VideoVerifier:
             }
 
             # Set weights for score calculation
-            video_score_weight = 0.6
+            video_score_weight = 0.4
             audio_score_weight = 0.2
-            runtime_weight = 0.2
+            runtime_weight = 0.4
 
             # Process completion time if provided
             runtime_score = 0
