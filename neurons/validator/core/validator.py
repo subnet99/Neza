@@ -261,7 +261,6 @@ class VideoValidator(BaseValidatorNeuron):
         The consensus score and the original score each account for 50%.
         """
         try:
-            bt.logging.info(f"original scores:{self.scores}")
             consensus_scores_array = get_consensus_scores_sync()
             adjusted_scores = np.zeros(self.metagraph.n, dtype=np.float32)
             len_score = len(self.scores)
@@ -275,11 +274,8 @@ class VideoValidator(BaseValidatorNeuron):
                     bt.logging.error(f"Error processing UID {uid}: {str(e)}")
                     continue
             self.scores = adjusted_scores
-            bt.logging.info(f"consensus scores:{consensus_scores_array}")
-            bt.logging.info(f"adjusted scores:{self.scores}")
         except Exception as e:
             bt.logging.error(f"Error combining consensus scores: {str(e)}")
-            bt.logging.error(traceback.format_exc())
 
     def get_all_miner_uids(self):
         """

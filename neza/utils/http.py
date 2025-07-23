@@ -743,9 +743,6 @@ def get_consensus_scores_sync():
             "cache-control": "no-cache",
             "pragma": "no-cache",
         }
-
-        bt.logging.info(f"Getting consensus scores from: {url}")
-
         response = requests.get(url, headers=headers, timeout=30)
 
         if response.status_code == 200:
