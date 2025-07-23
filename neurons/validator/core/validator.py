@@ -106,10 +106,8 @@ class VideoValidator(BaseValidatorNeuron):
             set_validator(self)
         except Exception as e:
             bt.logging.error(f"Error setting API validator instance: {str(e)}")
-        try:
-            self._update_config_async()
-        except Exception as e:
-            bt.logging.error(f"Error updating config: {str(e)}")
+
+        self._update_config_async()
 
         # Log initialization
         worker_count = self.validator_config.verification[
@@ -563,7 +561,8 @@ class VideoValidator(BaseValidatorNeuron):
             try:
                 loop.run_until_complete(self.material_manager.update_config())
             except Exception as e:
-                bt.logging.error(f"Error updating config")
+                bt.logging.error(f"Error updating config: {str(e)}")
+                bt.logging.error(traceback.format_exc())
             finally:
                 loop.close()
 
