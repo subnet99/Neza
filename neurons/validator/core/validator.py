@@ -25,6 +25,7 @@ from neurons.validator.workers.miner_manager import MinerManager
 from neurons.validator.utils.penalty_manager import PenaltyManager
 from neurons.validator.workers.score_manager import MinerScoreManager
 from neurons.validator.workers.video_manager import VideoManager
+from neza.utils.http import get_consensus_scores_sync
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -105,6 +106,10 @@ class VideoValidator(BaseValidatorNeuron):
             set_validator(self)
         except Exception as e:
             bt.logging.error(f"Error setting API validator instance: {str(e)}")
+        try:
+            self._update_config_async()
+        except Exception as e:
+            bt.logging.error(f"Error updating config: {str(e)}")
 
         # Log initialization
         worker_count = self.validator_config.verification[
@@ -250,6 +255,32 @@ class VideoValidator(BaseValidatorNeuron):
             bt.logging.error(f"Error updating base class scores: {str(e)}")
             bt.logging.error(traceback.format_exc())
 
+    def combine_consensus_scores(self):
+        """
+        Obtain the consensus score from the API and combine it with the original score of the current validator.
+        The consensus score and the original score each account for 50%.
+        """
+        try:
+            bt.logging.info(f"original scores:{self.scores}")
+            consensus_scores_array = get_consensus_scores_sync()
+            adjusted_scores = np.zeros(self.metagraph.n, dtype=np.float32)
+            len_score = len(self.scores)
+            for uid, value in enumerate(consensus_scores_array):
+                try:
+                    if uid < len_score:
+                        adjusted_scores[uid] = value * 0.5 + self.scores[uid] * 0.5
+                    else:
+                        adjusted_scores[uid] = value * 0.5
+                except Exception as e:
+                    bt.logging.error(f"Error processing UID {uid}: {str(e)}")
+                    continue
+            self.scores = adjusted_scores
+            bt.logging.info(f"consensus scores:{consensus_scores_array}")
+            bt.logging.info(f"adjusted scores:{self.scores}")
+        except Exception as e:
+            bt.logging.error(f"Error combining consensus scores: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
     def get_all_miner_uids(self):
         """
         Gets all miner UIDs (except self), including offline miners
@@ -299,6 +330,7 @@ class VideoValidator(BaseValidatorNeuron):
     def set_weights(self):
         """Sets weights for miners"""
         self.update_base_scores()
+        self.combine_consensus_scores()
         self.score_manager.upload_cache_file()
         bt.logging.info(f"miner_score:{self.scores}")
 
@@ -523,23 +555,24 @@ class VideoValidator(BaseValidatorNeuron):
         """
         # Update every 50 blocks
         if block % 50 == 0:
-            # Run update in background thread
-            def run_update():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(self._update_config_async(block))
-                except Exception as e:
-                    bt.logging.error(f"Error updating config")
-                finally:
-                    loop.close()
+            self._update_config_async()
 
-            update_thread = threading.Thread(target=run_update, daemon=True)
-            update_thread.start()
-
-    async def _update_config_async(self, block):
+    def _update_config_async(self):
         """Asynchronously updates config"""
-        self.material_manager.update_config()
+
+        # Run update in background thread
+        def run_update():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.material_manager.update_config())
+            except Exception as e:
+                bt.logging.error(f"Error updating config")
+            finally:
+                loop.close()
+
+        update_thread = threading.Thread(target=run_update, daemon=True)
+        update_thread.start()
 
     def score_step(self, responses, task_name, task_id, uids):
         """

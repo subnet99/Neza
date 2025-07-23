@@ -158,7 +158,7 @@ class MinerManager:
         """Synchronously updates available miners list"""
         try:
             # Validator stake limit (validators with stake above this won't be selected as miners)
-            validator_stake_limit = 1000
+            validator_stake_limit = 10000
 
             available_miners = []
             miner_info_cache = {}

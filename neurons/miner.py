@@ -87,7 +87,7 @@ class VideoMiner(BaseMinerNeuron):
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
         stake = self.metagraph.S[uid].item()
         network = self.config.subtensor.network
-        if network != "test" and stake < 1000:
+        if network != "test" and stake < 10000:
             bt.logging.warning(
                 f"Blacklisting request from {synapse.dendrite.hotkey} [uid={uid}], not enough stake -- {stake}"
             )

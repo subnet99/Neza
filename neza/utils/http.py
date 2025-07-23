@@ -468,7 +468,7 @@ def upload_cache_file_sync(validator_wallet, cache_file_path=None):
 
         if response.status_code == 204:
             bt.logging.info("Cache file uploaded successfully")
-            return response.json()
+            return True
         else:
             bt.logging.error(
                 f"Failed to upload cache file: status code {response.status_code}"
@@ -719,3 +719,45 @@ def check_get_url_resource_available_sync(url, get_file_info=False, timeout=10):
     except Exception as e:
         bt.logging.error(f"Error checking resource URL: {str(e)}, URL: {url[:142]}...")
         return False if not get_file_info else (False, {})
+
+
+def get_consensus_scores_sync():
+    """
+    Synchronously get miner consensus scores
+
+    Args:
+        miner_hotkey: Optional, specify the hotkey of the miner, if provided, only return the score of the miner
+
+    Returns:
+        dict: Dictionary containing miner consensus scores, or None if request fails
+    """
+    try:
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set, using default")
+
+        url = f"{owner_host}/v1/public/consensus-scores"
+
+        headers = {
+            "accept": "application/json",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+        }
+
+        bt.logging.info(f"Getting consensus scores from: {url}")
+
+        response = requests.get(url, headers=headers, timeout=30)
+
+        if response.status_code == 200:
+            result = response.json()
+            bt.logging.info(f"Successfully obtained consensus scores")
+            return result
+        else:
+            bt.logging.error(
+                f"Failed to get consensus scores: status code {response.status_code}, error: {response.text}"
+            )
+            return None
+    except Exception as e:
+        bt.logging.error(f"Error getting consensus scores: {str(e)}")
+        bt.logging.error(traceback.format_exc())
+        return None

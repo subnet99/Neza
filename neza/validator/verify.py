@@ -503,6 +503,16 @@ class VideoVerifier:
                 metrics["completion_time"] = completion_time
                 metrics["runtime_score"] = runtime_scale
 
+            if video_cos_sim < 0.95 or audio_cos_sim < 0.95:
+                bt.logging.warning(
+                    f"Low similarity detected: video={video_cos_sim:.4f}, audio={audio_cos_sim:.4f}, setting score to 0"
+                )
+                metrics["video_component_score"] = video_score_weight * video_cos_sim
+                metrics["audio_component_score"] = audio_score_weight * audio_cos_sim
+                metrics["runtime_component_score"] = runtime_weight * runtime_score
+                metrics["final_score"] = 0
+                return 0.0, metrics
+
             # Calculate combined score
             score = (
                 video_score_weight * video_cos_sim
