@@ -552,19 +552,16 @@ class VideoValidator(BaseValidatorNeuron):
             self._update_config_async()
 
     def _update_config_async(self):
-        """Asynchronously updates config"""
+        """Updates config in a background thread"""
 
         # Run update in background thread
         def run_update():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self.material_manager.update_config())
+                self.material_manager.update_config()
+                bt.logging.info("Config updated successfully")
             except Exception as e:
                 bt.logging.error(f"Error updating config: {str(e)}")
                 bt.logging.error(traceback.format_exc())
-            finally:
-                loop.close()
 
         update_thread = threading.Thread(target=run_update, daemon=True)
         update_thread.start()
