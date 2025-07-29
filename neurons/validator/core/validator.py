@@ -227,6 +227,7 @@ class VideoValidator(BaseValidatorNeuron):
         """
         try:
             # Get all miner UIDs
+            available_miners = self.miner_manager.get_available_miners_cache()
             all_uids = self.get_all_miner_uids()
             if not all_uids:
                 bt.logging.warning("No miners found, skipping score update")
@@ -240,6 +241,9 @@ class VideoValidator(BaseValidatorNeuron):
 
             # Fill in current scores (using raw scores, not normalized)
             for uid in all_uids:
+                if uid not in available_miners:
+                    new_scores[uid] = 0.0
+                    continue
                 new_scores[uid] = weights.get(uid, 0.0)
 
             # Update BaseValidatorNeuron's scores attribute
@@ -262,8 +266,13 @@ class VideoValidator(BaseValidatorNeuron):
             consensus_scores_array = get_consensus_scores_sync()
             adjusted_scores = np.zeros(self.metagraph.n, dtype=np.float32)
             len_score = len(self.scores)
+            available_miners = self.miner_manager.get_available_miners_cache()
+
             for uid, value in enumerate(consensus_scores_array):
                 try:
+                    if uid not in available_miners:
+                        adjusted_scores[uid] = 0.0
+                        continue
                     if uid < len_score:
                         adjusted_scores[uid] = value * 0.5 + self.scores[uid] * 0.5
                     else:
@@ -641,7 +650,7 @@ class VideoValidator(BaseValidatorNeuron):
         Create a new wandb run
         """
         now = datetime.now()
-        run_id = now.strftime("%y%m%d%H%M%S")
+        run_id = now.strftime("%y%m%d_%H%M%S")
 
         self.wandb_run_start_time = now
         self.wandb_run = wandb.init(
@@ -657,3 +666,6 @@ class VideoValidator(BaseValidatorNeuron):
             allow_val_change=True,
             anonymous="allow",
         )
+
+        log_path = os.path.join(self.wandb_run.dir, "output.log")
+        self.wandb_run.save(log_path, base_path=self.wandb_run.dir)

@@ -616,13 +616,43 @@ class VerificationManager:
 
         Args:
             task_id: Task ID
-            miner_hotkey: Miner hotkey
+            miner_hotkey: Miner original hotkey
             miner_uid: Miner UID
             score: Verification score
             completion_time: Task completion time
             metrics: Detailed metrics from verification
         """
         try:
+            # Check if the original hotkey matches the current hotkey for this UID
+            current_hotkey = None
+            try:
+                if miner_uid is not None:
+                    # Use cached hotkey from miner manager
+                    current_hotkey = self.validator.miner_manager.all_miner_hotkeys.get(
+                        miner_uid
+                    )
+                    if current_hotkey is None:
+                        # Fallback to metagraph if not in cache
+                        if miner_uid < len(self.validator.metagraph.hotkeys):
+                            current_hotkey = self.validator.metagraph.hotkeys[miner_uid]
+            except Exception as e:
+                bt.logging.warning(
+                    f"Error getting current hotkey for UID {miner_uid}: {str(e)}"
+                )
+
+            # If hotkey has changed, skip score recording
+            if current_hotkey is not None and current_hotkey != miner_hotkey:
+                bt.logging.warning(
+                    f"Hotkey changed for UID {miner_uid}: original={miner_hotkey[:10]}..., current={current_hotkey[:10]}..., skipping score recording for task {task_id}"
+                )
+                # Update task status to indicate hotkey change
+                await self.validator.task_manager._db_op(
+                    self.validator.task_manager.db.update_task_status,
+                    task_id=task_id,
+                    status="hotkey_changed",
+                )
+                return
+
             # Update task in database
             await self.validator.task_manager._db_op(
                 self.validator.task_manager.db.update_task_with_score,

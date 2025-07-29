@@ -185,6 +185,14 @@ class BaseValidatorNeuron(BaseNeuron):
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
 
+                # Check wandb run expiration (if wandb is enabled)
+                if self.wandb_run_start_time is not None:
+                    now = datetime.now()
+                    if now - self.wandb_run_start_time > timedelta(days=1):
+                        bt.logging.info("WANDB run expired, starting a new one")
+                        self.wandb_run.finish()
+                        self.new_wandb_run()
+
                 # Check if we should exit.
                 if self.should_exit:
                     break
@@ -194,13 +202,6 @@ class BaseValidatorNeuron(BaseNeuron):
                 self._sync_in_thread()
 
                 self.step += 1
-
-                if not self.config.wandb.off:
-                    now = datetime.now()
-                    if now - self.wandb_run_start_time > timedelta(days=1):
-                        bt.logging.info("WANDB run expired, starting a new one")
-                        self.wandb_run.finish()
-                        self.new_wandb_run()
 
         # If someone intentionally stops the validator, it'll safely terminate operations.
         except KeyboardInterrupt:
