@@ -94,7 +94,13 @@ def ttl_get_block(self) -> int:
 
     Note: self here is the miner or validator instance
     """
-    return self.subtensor.get_current_block()
+    # Use lock to prevent concurrent WebSocket access
+    if hasattr(self, "_subtensor_lock") and self._subtensor_lock is not None:
+        with self._subtensor_lock:
+            result = self.subtensor.get_current_block()
+            return result
+    else:
+        return self.subtensor.get_current_block()
 
 
 def copy_audio_wav(video_path: str, output_wav: str):

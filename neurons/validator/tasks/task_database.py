@@ -38,7 +38,7 @@ class TaskDatabase:
             # Directly call the original add_task method, without using await
             success = self.db.add_task(
                 task_dict["task_id"],
-                task_dict["workflow_params"],
+                task_dict["complete_workflow"],
                 task_dict["secret_key"],
                 task_dict["timeout_seconds"],
             )
@@ -66,6 +66,42 @@ class TaskDatabase:
             bt.logging.error(f"Error getting task {task_id}: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return None
+
+    async def batch_get_tasks(self, task_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Get multiple tasks from database
+
+        Args:
+            task_ids: List of task IDs
+
+        Returns:
+            List of task dictionaries
+        """
+        try:
+            return self.db.batch_get_tasks(task_ids)
+        except Exception as e:
+            bt.logging.error(f"Error batch getting tasks: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return []
+
+    async def batch_update_timeout_tasks_with_scores(
+        self, timeout_tasks: List[tuple]
+    ) -> bool:
+        """
+        Batch update timeout tasks with status and scores
+
+        Args:
+            timeout_tasks: List of tuples (task_id, miner_hotkey, score)
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            return self.db.batch_update_timeout_tasks_with_scores(timeout_tasks)
+        except Exception as e:
+            bt.logging.error(f"Error batch updating timeout tasks: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return False
 
     async def update_task_status(self, task_id: str, status: str) -> bool:
         """
@@ -480,7 +516,7 @@ class TaskDatabase:
             bool: True if successful, False otherwise
         """
         try:
-            last_sent_datetime = datetime.fromtimestamp(last_sent_at)
+            last_sent_datetime = datetime.fromtimestamp(last_sent_at, tz=timezone.utc)
 
             # Call the database update method
             return self.db.update_task_last_sent_at(

@@ -139,26 +139,6 @@ async def get_miners_stats() -> List[Dict[str, Any]]:
     return validator_db.get_miner_stats()
 
 
-async def create_task(
-    task_id: str, prompt: str, secret_key: str, timeout_seconds: int = 3600
-) -> bool:
-    """
-    Create a new task
-
-    Args:
-        task_id: Task ID
-        prompt: Prompt text
-        secret_key: Secret key
-        timeout_seconds: Timeout in seconds
-
-    Returns:
-        Whether successful
-    """
-    # Convert prompt to workflow parameters format
-    workflow_params = {"prompt": prompt}
-    return validator_db.add_task(task_id, workflow_params, secret_key, timeout_seconds)
-
-
 async def verify_task_secret(task_id: str, secret_key: str) -> bool:
     """
     Verify task secret key

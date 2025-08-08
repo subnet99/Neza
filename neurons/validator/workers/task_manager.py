@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from urllib.parse import urlparse
 import uuid
 import json
 import random
@@ -17,10 +18,15 @@ import bittensor as bt
 from neza.protocol import VideoGenerationTask, TaskStatusCheck, VideoTask
 
 # Import HTTP utilities
-from neza.utils.http import check_url_resource_available, request_upload_url
+from neza.utils.http import (
+    check_url_resource_available,
+    get_result_upload_urls,
+    http_put_request_sync,
+    request_upload_url,
+    get_online_task_count,
+)
 from neurons.validator.tasks.task import Task
 from neurons.validator.tasks.task_database import TaskDatabase
-from neurons.validator.tasks.task_factory import TaskFactory
 
 
 class TaskManager:
@@ -39,9 +45,6 @@ class TaskManager:
 
         # Task database
         self.db = TaskDatabase()
-
-        # Task factory
-        self.task_factory = TaskFactory(self.validator.material_manager)
 
         # Task processing lock
         self.task_lock = threading.Lock()
@@ -99,9 +102,7 @@ class TaskManager:
             thread.daemon = True
             thread.start()
         else:
-            bt.logging.debug(
-                f"Skipping task processing on block {block_number} (not divisible by 10)"
-            )
+            bt.logging.debug(f"Skipping task processing on block {block_number}")
 
     def _process_tasks_in_thread(self):
         """Process tasks in a separate thread"""
@@ -133,9 +134,6 @@ class TaskManager:
         try:
             # Process pending tasks
             await self._process_pending_tasks()
-
-            # Check active tasks
-            await self._check_active_tasks()
 
             # Verify completed tasks
             await self._verify_completed_tasks()
@@ -255,31 +253,21 @@ class TaskManager:
     async def _process_pending_tasks(self):
         """Process pending tasks and create synthetic tasks"""
         try:
-            # 1. Get available miners and their load information
-            miners_with_capacity = (
-                await self.validator.miner_manager.get_miners_with_capacity()
-            )
-            if not miners_with_capacity:
-                return
-
-            # 2. Process new pending tasks from database (excluding retry tasks)
-            tasks_processed = await self._process_db_pending_tasks(miners_with_capacity)
-
-            # 3. Get updated miner load information (may have changed)
+            # 1. Get updated miner load information
             updated_miners_with_capacity = (
                 await self.validator.miner_manager.get_miners_with_capacity()
             )
             if not updated_miners_with_capacity:
                 return
 
-            # 4. Create synthetic tasks
-            bt.logging.info(f"Creating synthetic tasks")
-            tasks_created = await self._create_synthetic_tasks(
+            # 2. Fetch synthetic tasks
+            bt.logging.info(f"Fetching synthetic tasks")
+            tasks_created = await self._fetch_synthetic_tasks(
                 updated_miners_with_capacity
             )
 
             # Update last task creation time if tasks were processed or created
-            if tasks_processed or tasks_created > 0:
+            if tasks_created > 0:
                 self.last_task_creation_time = time.time()
                 bt.logging.info(
                     f"Updated last task creation time to {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.last_task_creation_time))}"
@@ -288,40 +276,6 @@ class TaskManager:
         except Exception as e:
             bt.logging.error(f"Error in _process_pending_tasks: {str(e)}")
             bt.logging.error(traceback.format_exc())
-
-    async def _process_db_pending_tasks(self, miners_with_capacity):
-        """
-        Process pending tasks from database
-
-        Args:
-            miners_with_capacity: List of miners with capacity
-
-        Returns:
-            Number of tasks processed
-        """
-        try:
-            # Get pending tasks from database
-            pending_tasks = await self._db_op(self.db.get_pending_tasks, 10)
-            if not pending_tasks:
-                return 0
-
-            bt.logging.info(f"Processing {len(pending_tasks)} pending tasks")
-
-            # Select miners for tasks using task density algorithm
-            selected_miners = await self._select_miners_by_task_density(
-                miners_with_capacity, len(pending_tasks)
-            )
-
-            await self._assign_tasks_to_miners(
-                pending_tasks, selected_miners, miners_with_capacity
-            )
-
-            return len(pending_tasks)
-
-        except Exception as e:
-            bt.logging.error(f"Error processing pending tasks: {str(e)}")
-            bt.logging.error(traceback.format_exc())
-            return 0
 
     async def _assign_tasks_to_miners(
         self, tasks, selected_miners, miners_with_capacity
@@ -351,15 +305,7 @@ class TaskManager:
                 miner_hotkey = miner["hotkey"]
 
                 # Get workflow params
-                workflow_params = task["workflow_params"]
-                if isinstance(workflow_params, str):
-                    try:
-                        workflow_params = json.loads(workflow_params)
-                    except:
-                        bt.logging.warning(
-                            f"Failed to parse workflow params for task {task_id}"
-                        )
-                        continue
+                complete_workflow = task["complete_workflow"]
 
                 # Get secret key
                 secret_key = task["secret_key"]
@@ -377,7 +323,7 @@ class TaskManager:
 
                 success = await self._send_task_to_miner(
                     task_id,
-                    workflow_params,
+                    complete_workflow,
                     task_id,
                     secret_key,
                     timeout_seconds,
@@ -429,9 +375,9 @@ class TaskManager:
                 )
                 break
 
-    async def _create_synthetic_tasks(self, miners_with_capacity):
+    async def _fetch_synthetic_tasks(self, miners_with_capacity):
         """
-        Create synthetic tasks based on available miners with capacity
+        fetch synthetic tasks based on available miners with capacity
 
         Args:
             miners_with_capacity: List of miners with capacity
@@ -440,17 +386,41 @@ class TaskManager:
             int: Number of tasks created
         """
         try:
-            # Determine how many synthetic tasks to create based on miners with capacity
-            max_tasks = self._determine_synthetic_task_count(miners_with_capacity)
-            if max_tasks <= 0:
+            # Get configuration values
+            generate_max_tasks = self.validator.validator_config.miner_selection.get(
+                "generate_max_tasks", 3
+            )
+
+            # Get comfy servers count
+            comfy_servers = self.validator.validator_config.comfy_servers
+            comfy_server_count = len(comfy_servers) if comfy_servers else 1
+
+            # Count miners with capacity
+            available_count = len(miners_with_capacity)
+
+            # Calculate request count as minimum of three values
+            request_count = min(comfy_server_count, available_count, generate_max_tasks)
+            if request_count <= 0:
                 bt.logging.debug("No capacity for synthetic tasks")
                 return 0
 
-            bt.logging.info(f"Creating up to {max_tasks} synthetic tasks")
+            # Get task count from online API with calculated request count
+            online_task_count, online_tasks = await get_online_task_count(
+                self.validator.wallet, request_count
+            )
+            if online_task_count <= 0:
+                bt.logging.debug("No tasks available from online API")
+                return 0
 
-            # Select miners for synthetic tasks based on various factors like:
+            # Calculate actual task count as minimum of online tasks and request count
+            actual_task_count = min(online_task_count, request_count)
+            bt.logging.info(
+                f"Task count calculation: comfy_servers={comfy_server_count}, local_capacity={available_count}, generate_max_tasks={generate_max_tasks}, request_count={request_count}, online={online_task_count}, actual={actual_task_count}"
+            )
+
+            # Select miners for synthetic tasks
             selected_miners = await self._select_miners_for_synthetic_tasks(
-                miners_with_capacity, max_tasks
+                miners_with_capacity, actual_task_count
             )
             if not selected_miners:
                 bt.logging.warning("No miners available for synthetic tasks")
@@ -459,24 +429,87 @@ class TaskManager:
             # Log available miners for debugging
             self._log_available_miners(miners_with_capacity)
 
-            # Create and assign synthetic tasks to the selected miners
-            await self._create_and_assign_synthetic_tasks(
-                selected_miners, miners_with_capacity
-            )
-
-            bt.logging.info(
-                f"Created and assigned {len(selected_miners)} synthetic tasks"
-            )
-            return len(selected_miners)
+            # Store online tasks to database and assign to miners
+            if online_tasks and len(online_tasks) > 0:
+                tasks_assigned = await self._store_and_assign_online_tasks(
+                    online_tasks, selected_miners, miners_with_capacity
+                )
+                bt.logging.info(
+                    f"Stored and assigned {tasks_assigned} online tasks to miners"
+                )
+                return tasks_assigned
+            else:
+                bt.logging.warning("No online tasks to assign")
+                return 0
 
         except Exception as e:
-            bt.logging.error(f"Error creating synthetic tasks: {str(e)}")
+            bt.logging.error(f"Error fetching synthetic tasks: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return 0
+
+    async def _store_and_assign_online_tasks(
+        self, online_tasks, selected_miners, miners_with_capacity
+    ):
+        """
+        Store online tasks to database and assign to miners
+
+        Args:
+            online_tasks: List of tasks from online API
+            selected_miners: List of selected miners
+            miners_with_capacity: List of miners with capacity
+
+        Returns:
+            int: Number of tasks successfully assigned
+        """
+        try:
+            # Convert online tasks to the format expected by _assign_tasks_to_miners
+            converted_tasks = []
+
+            for task_data in online_tasks:
+                task_id = task_data.get("task_id")
+                workflow_json = task_data.get("workflow_json", {})
+
+                if not task_id or not workflow_json:
+                    bt.logging.warning(f"Invalid task data: {task_data}")
+                    continue
+
+                # Create Task object for database storage
+                task_obj = Task(
+                    task_id=task_id,
+                    complete_workflow=workflow_json,
+                    timeout_seconds=self.validator.validator_config.task_timeout_seconds,
+                )
+
+                # Store task to database
+                success = await self._db_op(
+                    self.db.add_task,
+                    task_obj,
+                )
+
+                if not success:
+                    bt.logging.error(f"Failed to store task {task_id} to database")
+                    continue
+                converted_tasks.append(task_obj.to_dict())
+
+            if not converted_tasks:
+                bt.logging.warning("No valid tasks to assign")
+                return 0
+
+            # Use the existing _assign_tasks_to_miners method
+            await self._assign_tasks_to_miners(
+                converted_tasks, selected_miners, miners_with_capacity
+            )
+
+            return len(converted_tasks)
+
+        except Exception as e:
+            bt.logging.error(f"Error storing and assigning online tasks: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return 0
 
     def _determine_synthetic_task_count(self, miners_with_capacity):
         """
-        Determine how many synthetic tasks to create
+        Determine how many synthetic tasks to create (legacy method, logic moved to _fetch_synthetic_tasks)
 
         Args:
             miners_with_capacity: List of miners with capacity
@@ -484,20 +517,9 @@ class TaskManager:
         Returns:
             Number of tasks to create
         """
-        # Get max tasks from config
-        max_tasks = self.validator.validator_config.miner_selection.get(
-            "generate_max_tasks", 3
-        )
-
-        # Count miners with capacity
-        available_count = sum(
-            1
-            for m in miners_with_capacity
-            if m["remaining_capacity"] > 0 and not m["is_penalized"]
-        )
-
-        # Limit to a reasonable number
-        return min(available_count, max_tasks)
+        # This method is kept for backward compatibility
+        # The actual logic is now in _fetch_synthetic_tasks
+        return 0
 
     async def _select_miners_for_synthetic_tasks(self, miners_with_capacity, max_tasks):
         """
@@ -594,162 +616,10 @@ class TaskManager:
             f"Available miners with capacity: {available_count}/{len(miners_with_capacity)}"
         )
 
-    async def _create_and_assign_synthetic_tasks(
-        self, selected_miners, available_miners
-    ):
-        """
-        Create and assign synthetic tasks to selected miners
-
-        Args:
-            selected_miners: List of selected miners to receive tasks
-            available_miners: Complete list of available miners with capacity info
-        """
-        try:
-            # Log the number of miners selected for task assignment
-            bt.logging.info(
-                f"Creating tasks for {len(selected_miners)} selected miners"
-            )
-
-            # Get materials for all miners at once
-            materials_list = self.validator.material_manager.get_multiple_materials(
-                len(selected_miners)
-            )
-            if not materials_list:
-                bt.logging.warning(
-                    "Failed to get materials for tasks, using fallback method"
-                )
-
-            # Create and assign tasks for each selected miner
-            for i, miner in enumerate(selected_miners):
-                # Extract miner information for logging
-                miner_hotkey = miner.get("hotkey", "unknown")[:10]
-                miner_uid = miner.get("uid", -1)
-
-                task = None
-
-                # Try to use pre-fetched materials if available
-                if materials_list and i < len(materials_list):
-                    material_info = materials_list[i]
-                    if "task_params" in material_info and material_info["task_params"]:
-                        # Generate a task ID
-                        task_id = f"{uuid.uuid4().hex}"
-
-                        # Use validator config for timeout
-                        timeout_seconds = (
-                            self.validator.validator_config.task_timeout_seconds
-                        )
-
-                        # Create task with the material parameters
-                        task = Task(
-                            task_id=task_id,
-                            workflow_params=material_info["task_params"],
-                            timeout_seconds=timeout_seconds,
-                            is_synthetic=True,
-                        )
-                        bt.logging.info(
-                            f"Created task from pre-fetched materials for miner {miner_hotkey}"
-                        )
-
-                # Fallback to task factory methods if material approach failed
-                if not task:
-                    # Create synthetic task using material manager
-                    task = self.task_factory.create_task_from_materials()
-                    if not task:
-                        # Fallback to simple synthetic task if materials-based task creation fails
-                        bt.logging.warning(
-                            f"Failed to create materials-based task for miner {miner_hotkey}, trying simple task"
-                        )
-                        task = self.task_factory.create_synthetic_task()
-
-                if not task:
-                    bt.logging.warning(
-                        f"Failed to create any synthetic task for miner {miner_hotkey}"
-                    )
-                    continue
-
-                # Add task to database with proper tracking information
-                success = await self._db_op(self.db.add_task, task)
-                if not success:
-                    bt.logging.error(
-                        f"Failed to add synthetic task {task.task_id} to database for miner {miner_hotkey}"
-                    )
-                    continue
-
-                bt.logging.info(
-                    f"Added synthetic task {task.task_id} to database for miner {miner_hotkey}"
-                )
-
-                # Send task to miner with proper parameters
-                await self._send_synthetic_task(
-                    task.task_id,
-                    task.workflow_params,
-                    task.secret_key,
-                    task.timeout_seconds,
-                    miner,
-                    available_miners,
-                )
-
-                # Update task count in sended_miners
-                miner_hotkey = miner.get("hotkey")
-                if miner_hotkey in self.sended_miners:
-                    self.sended_miners[miner_hotkey] += 1
-                else:
-                    self.sended_miners[miner_hotkey] = 1
-
-                bt.logging.debug(
-                    f"Updated task count for miner {miner_hotkey[:10]}... to {self.sended_miners[miner_hotkey]}"
-                )
-
-        except Exception as e:
-            bt.logging.error(f"Error creating and assigning synthetic tasks: {str(e)}")
-            bt.logging.error(traceback.format_exc())
-
-    async def _send_synthetic_task(
-        self,
-        task_id,
-        task_params,
-        secret_key,
-        timeout_seconds,
-        selected_miner,
-        available_miners,
-    ):
-        """
-        Send synthetic task to miner
-
-        Args:
-            task_id: Task ID
-            task_params: Task parameters
-            secret_key: Secret key
-            timeout_seconds: Timeout in seconds
-            selected_miner: Selected miner
-            available_miners: List of available miners
-        """
-        try:
-            miner_uid = selected_miner["uid"]
-            miner_hotkey = selected_miner["hotkey"]
-
-            # Send task to miner
-            bt.logging.info(
-                f"Sending synthetic task {task_id} to miner {miner_hotkey[:10] if miner_hotkey else 'None'}..."
-            )
-
-            # For synthetic tasks, task_id is used as file_name
-            success = await self._send_task_to_miner(
-                task_id, task_params, task_id, secret_key, timeout_seconds, miner_uid
-            )
-
-            if success:
-                # Update miner load
-                self._update_miner_load_after_task(available_miners, selected_miner)
-
-        except Exception as e:
-            bt.logging.error(f"Error sending synthetic task: {str(e)}")
-            bt.logging.error(traceback.format_exc())
-
     async def _send_task_to_miner(
         self,
         task_id,
-        workflow_params,
+        complete_workflow,
         file_name,
         secret_key,
         timeout_seconds,
@@ -760,7 +630,7 @@ class TaskManager:
 
         Args:
             task_id: Task ID
-            workflow_params: Workflow parameters
+            complete_workflow: Complete workflow
             file_name: File name
             secret_key: Secret key
             timeout_seconds: Timeout in seconds
@@ -784,82 +654,13 @@ class TaskManager:
                 upload_url = upload_info.get("upload_url") if upload_info else ""
                 preview_url = upload_info.get("preview_url") if upload_info else ""
 
-                if upload_url:
-                    bt.logging.info(f"Got upload URL success")
-                else:
+                if not upload_url:
                     bt.logging.warning(f"No upload URL received for task {task_id}")
             except Exception as e:
                 bt.logging.error(f"Error requesting upload URL: {str(e)}")
                 bt.logging.error(traceback.format_exc())
                 upload_url = ""
                 preview_url = ""
-
-            # Get the task with complete workflow from database
-            task_details = await self._db_op(self.db.get_task, task_id)
-            if not task_details:
-                bt.logging.error(f"Task {task_id} not found in database after saving")
-                return False
-
-            # Get Comfy config
-            comfy_config = self.validator.material_manager.get_comfy_config()
-            if not comfy_config:
-                bt.logging.error("Unable to get Comfy config")
-                return False
-
-            # Log workflow preparation
-            bt.logging.info(f"Preparing workflow configuration for task {task_id}")
-
-            # Merge config and workflow parameters to generate complete workflow configuration
-            workflow_mapping = self.validator.material_manager.get_workflow_mapping()
-
-            # Measure workflow preparation time
-            workflow_start_time = time.time()
-
-            if "mapping" not in workflow_params:
-                # If no mapping is provided, use static mapping
-                workflow_params_with_mapping = {
-                    "params": workflow_params.get("params", workflow_params),
-                    "mapping": workflow_mapping,
-                }
-                final_workflow_params = self.validator.material_manager.merge_configs(
-                    comfy_config, workflow_params_with_mapping
-                )
-            else:
-                # If mapping is already provided, use it directly
-                final_workflow_params = self.validator.material_manager.merge_configs(
-                    comfy_config, workflow_params
-                )
-
-            workflow_prep_time = time.time() - workflow_start_time
-            bt.logging.info(
-                f"Workflow preparation completed in {workflow_prep_time:.2f} seconds"
-            )
-
-            # Log workflow complexity
-            if isinstance(final_workflow_params, dict):
-                node_count = len(final_workflow_params)
-                bt.logging.info(f"Final workflow contains {node_count} nodes")
-
-            # Save the generated complete workflow back to database
-            await self._db_op(
-                self.db.update_task_complete_workflow,
-                task_id=task_id,
-                complete_workflow=final_workflow_params,
-                upload_url=upload_url,
-                preview_url=preview_url,
-                miner_hotkey=miner_hotkey,
-                miner_info=getattr(self.validator, "miner_info_cache", {}),
-            )
-
-            # Create task object - use VideoTask directly
-            task_obj = VideoTask(
-                task_id=task_id,
-                file_name=file_name,
-                secret_key=secret_key,
-                workflow_params=final_workflow_params,
-                upload_url=upload_url,
-                preview_url=preview_url,
-            )
 
             # Log sending task
             bt.logging.info(
@@ -869,6 +670,15 @@ class TaskManager:
             # Record task preparation time
             prep_time = time.time() - start_time
             bt.logging.info(f"Task preparation completed in {prep_time:.2f} seconds")
+
+            task_obj = VideoTask(
+                task_id=task_id,
+                file_name=file_name,
+                secret_key=secret_key,
+                workflow_params=complete_workflow,
+                upload_url=upload_url,
+                preview_url=preview_url,
+            )
 
             # Call _send_task and return result
             return await self._send_task(
@@ -923,48 +733,21 @@ class TaskManager:
                 hasattr(response, "status_code") and response.status_code == 200
             )
 
-            # Get current task status
-            current_task = await self._db_op(self.db.get_task, task_id)
-            current_status = current_task.get("status") if current_task else None
-
-            # If current status is failed, do not update status
-            if current_status == "failed":
-                bt.logging.info(
-                    f"Task {task_id} is already in failed status, not updating status"
-                )
-                # Only update other information, do not update status
-                await self._db_op(
-                    self.db.update_task_with_upload_info,
-                    task_id=task_id,
-                    miner_hotkey=miner_hotkey,
-                    preview_url=(
-                        task_obj.preview_url
-                        if task_obj.preview_url
-                        else response.video_url if isResponse else ""
-                    ),
-                    status=current_status,  # Keep current status
-                    miner_info=getattr(self.validator, "miner_info_cache", {}),
-                    upload_url=(
-                        task_obj.upload_url if hasattr(task_obj, "upload_url") else ""
-                    ),
-                )
-            else:
-                # Normal update status
-                await self._db_op(
-                    self.db.update_task_with_upload_info,
-                    task_id=task_id,
-                    miner_hotkey=miner_hotkey,
-                    preview_url=(
-                        task_obj.preview_url
-                        if task_obj.preview_url
-                        else response.video_url if isResponse else ""
-                    ),
-                    status=("processing" if isResponse else "assigned"),
-                    miner_info=getattr(self.validator, "miner_info_cache", {}),
-                    upload_url=(
-                        task_obj.upload_url if hasattr(task_obj, "upload_url") else ""
-                    ),
-                )
+            await self._db_op(
+                self.db.update_task_with_upload_info,
+                task_id=task_id,
+                miner_hotkey=miner_hotkey,
+                preview_url=(
+                    task_obj.preview_url
+                    if task_obj.preview_url
+                    else response.video_url if isResponse else ""
+                ),
+                status=("processing" if isResponse else "assigned"),
+                miner_info=self.validator.miner_info_cache,
+                upload_url=(
+                    task_obj.upload_url if hasattr(task_obj, "upload_url") else ""
+                ),
+            )
 
             current_time = time.time()
             await self._db_op(
@@ -975,11 +758,15 @@ class TaskManager:
 
             # Update miner UID information
             try:
+                # Use lock to prevent WebSocket concurrency issues
+                with self.validator._subtensor_lock:
+                    current_block = self.validator.subtensor.get_current_block()
+
                 await self._db_op(
                     self.db.update_miner_uid,
                     hotkey=miner_hotkey,
                     uid=miner_uid,
-                    current_block=self.validator.subtensor.get_current_block(),
+                    current_block=current_block,
                 )
             except Exception as e:
                 bt.logging.warning(
@@ -996,25 +783,23 @@ class TaskManager:
             bt.logging.error(traceback.format_exc())
             return False
 
-    async def _check_active_tasks(self):
+    async def _check_active_tasks_optimized(self):
         """
-        Check active tasks (processing status) and update status if needed
+        Optimized version of active tasks checking with batch processing
         """
         try:
-            # Get active tasks - now a synchronous call
+            # Get active tasks
             active_tasks = self.db.get_active_tasks()
             if not active_tasks:
                 return
 
-            bt.logging.info(f"Checking {len(active_tasks)} active tasks")
+            bt.logging.info(f"Checking {len(active_tasks)} active tasks (optimized)")
 
-            # Track task status counts
-            completed_count = 0
-            failed_count = 0
-            still_running_count = 0
-            timeout_count = 0
+            # Separate tasks by timeout status
+            timed_out_tasks = []
+            valid_tasks = []
+            current_time = datetime.now(timezone.utc)
 
-            # Process each active task
             for task in active_tasks:
                 task_id = task["task_id"]
                 miner_hotkey = task.get("miner_hotkey")
@@ -1026,18 +811,22 @@ class TaskManager:
                     )
                     continue
 
-                # Get last sent time
-                last_sent_time = task.get("last_sent_at")
+                # Check if this task is already being processed by another thread
 
+                # Check timeout status
+                last_sent_time = task.get("last_sent_at")
                 if last_sent_time:
-                    # Get timeout time
                     timeout_seconds = task.get(
                         "timeout_seconds",
                         self.validator.validator_config.task_timeout_seconds,
                     )
 
-                    # Calculate task runtime
-                    if isinstance(last_sent_time, str):
+                    # Convert last_sent_time to datetime if needed
+                    if isinstance(last_sent_time, (int, float)):
+                        last_sent_time = datetime.fromtimestamp(
+                            last_sent_time, tz=timezone.utc
+                        )
+                    elif isinstance(last_sent_time, str):
                         try:
                             last_sent_time = datetime.fromisoformat(
                                 last_sent_time.replace("Z", "+00:00")
@@ -1048,118 +837,396 @@ class TaskManager:
                     # Check if timed out
                     if (
                         last_sent_time
-                        and (
-                            datetime.now(timezone.utc) - last_sent_time
-                        ).total_seconds()
+                        and (current_time - last_sent_time).total_seconds()
                         > timeout_seconds
                     ):
-                        # Update task status to timed out
-                        bt.logging.warning(
-                            f"Task {task_id} timed out after {timeout_seconds} seconds"
-                        )
-
-                        # Handle task failure due to timeout
-                        await self._handle_task_failure(task_id, "Timeout")
-                        timeout_count += 1
+                        timed_out_tasks.append((task_id, miner_hotkey))
                         continue
 
-                # Get miner UID
-                miner_uid = task.get("miner_uid")
-                if not miner_uid:
-                    # Try to get miner UID from hotkey
-                    try:
-                        miner_uid = self.validator.metagraph.hotkeys.index(miner_hotkey)
-                    except ValueError:
-                        bt.logging.warning(
-                            f"Miner hotkey {miner_hotkey[:10]} not found in metagraph"
-                        )
-                        continue
-
-                # Check if preview URL or video URL is available
+                # Add to valid tasks for URL checking
                 video_url = task.get("preview_url") or task.get("s3_video_url")
                 if video_url:
-                    is_available, file_info = await check_url_resource_available(
-                        video_url, get_file_info=True
-                    )
+                    valid_tasks.append((task, video_url))
 
-                    # Check if file size exceeds 10MB limit
-                    if is_available and file_info and "file_size" in file_info:
+            # Batch process timed out tasks
+            if timed_out_tasks:
+                bt.logging.info(f"Processing {len(timed_out_tasks)} timed out tasks")
+                await self._batch_handle_timeout_tasks(timed_out_tasks)
+
+            # Batch check URL availability for valid tasks
+            if valid_tasks:
+                bt.logging.info(
+                    f"Checking {len(valid_tasks)} valid tasks for URL availability"
+                )
+                await self._batch_check_url_availability(valid_tasks)
+
+        except Exception as e:
+            bt.logging.error(f"Error in optimized active tasks check: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    async def _batch_handle_timeout_tasks(self, timed_out_tasks):
+        """
+        Batch handle timeout tasks with optimized database operations
+        """
+        try:
+            if not timed_out_tasks:
+                return
+
+            bt.logging.info(
+                f"Starting batch processing of {len(timed_out_tasks)} timeout tasks"
+            )
+
+            # Extract task IDs and miner hotkeys
+            task_ids = [task_id for task_id, _ in timed_out_tasks]
+            miner_hotkeys = [hotkey for _, hotkey in timed_out_tasks]
+
+            # Batch get task info for all tasks
+            task_infos = await self._db_op(self.db.batch_get_tasks, task_ids)
+
+            # Create a mapping of task_id to task_info for easier lookup
+            task_info_map = {
+                task_info["task_id"]: task_info for task_info in task_infos
+            }
+
+            # Prepare timeout tasks that need score updates
+            timeout_tasks_with_scores = []
+            penalty_miners = set()
+
+            for task_id in task_ids:
+                task_info = task_info_map.get(task_id)
+                if task_info and task_info.get("score") is None:
+                    miner_hotkey = task_info.get("miner_hotkey")
+                    if miner_hotkey:
+                        timeout_tasks_with_scores.append((task_id, miner_hotkey, 0.0))
+                        penalty_miners.add(miner_hotkey)
+
+            # Batch update task status and scores in one operation
+            if timeout_tasks_with_scores:
+                await self._db_op(
+                    self.db.batch_update_timeout_tasks_with_scores,
+                    timeout_tasks=timeout_tasks_with_scores,
+                )
+
+            # Record scores in score manager (this is fast, no database operations)
+            for task_id, miner_hotkey, score in timeout_tasks_with_scores:
+                self.validator.score_manager.record_score(
+                    hotkey=miner_hotkey, task_id=task_id, score=score
+                )
+
+            # Record failures for miners (this is also fast)
+            for miner_hotkey in penalty_miners:
+                self.validator.penalty_manager.record_miner_failure(miner_hotkey)
+
+            # Batch upload task results with error information
+            upload_tasks = []
+            for task_id, miner_hotkey in timed_out_tasks:
+                error_info = {"error": "Timeout"}
+                upload_tasks.append(
+                    self.validator.verification_manager.upload_task(
+                        task_id, miner_hotkey, 0, error_info, 0, is_error=True
+                    )
+                )
+
+            # Execute uploads concurrently
+            if upload_tasks:
+                await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+            bt.logging.info(
+                f"Successfully processed {len(timed_out_tasks)} timeout tasks in batch mode"
+            )
+
+        except Exception as e:
+            bt.logging.error(f"Error in batch timeout handling: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    async def _batch_check_url_availability(self, valid_tasks):
+        """
+        Batch check URL availability and process completed tasks
+        """
+        try:
+            # Create tasks for concurrent URL checking
+            url_check_tasks = []
+            for task, video_url in valid_tasks:
+                url_check_tasks.append(self._check_single_task_url(task, video_url))
+
+            # Execute all URL checks concurrently
+            results = await asyncio.gather(*url_check_tasks, return_exceptions=True)
+
+            # Process results
+            completed_tasks = []
+            still_processing_tasks = []
+
+            for i, result in enumerate(results):
+                task, video_url = valid_tasks[i]
+                task_id = task["task_id"]
+
+                if isinstance(result, Exception):
+                    bt.logging.error(
+                        f"Error checking URL for task {task_id}: {str(result)}"
+                    )
+                    still_processing_tasks.append(task)
+                    continue
+
+                is_available, file_info = result
+
+                if is_available and file_info:
+                    # Check file size limit
+                    if "file_size" in file_info:
                         file_size_limit = (
                             self.validator.validator_config.file_size_limit
                         )
-                        file_size_mb = file_info["file_size"] / (
-                            1024 * 1024
-                        )  # Convert bytes to MB
+                        file_size_mb = file_info["file_size"] / (1024 * 1024)
+
                         if file_size_mb > file_size_limit:
                             bt.logging.warning(
                                 f"Task {task_id} failed: File size {file_size_mb:.2f}MB exceeds {file_size_limit}MB limit"
                             )
-                            # Handle task failure due to file size limit
                             await self._handle_task_failure(
                                 task_id,
                                 f"File size {file_size_mb:.2f}MB exceeds {file_size_limit}MB limit",
                             )
                             continue
 
-                    if is_available:
-                        # File is available, mark as completed
-                        file_size = file_info.get("file_size", "unknown")
-                        last_modified = file_info.get("last_modified", "")
-                        bt.logging.info(
-                            f"Task {task_id} completed by miner {miner_hotkey[:10] if miner_hotkey else 'None'}, file_size: {file_size}, last_modified: {last_modified}"
-                        )
-                        # Pre-download video to cache directory
-                        await self.validator.video_manager.download_video(
-                            task_id, video_url, "miner"
-                        )
-
-                        completion_time = None
-                        last_sent_at = task.get("last_sent_at")
-                        if last_modified and last_sent_at:
-                            completion_time = (
-                                last_modified - last_sent_at
-                            ).total_seconds()
-                            bt.logging.info(
-                                f"Task {task_id} completion time: {completion_time:.2f} seconds (last_modified - last_sent_at)"
-                            )
-
-                        # Update task in database
-                        await self._db_op(
-                            self.db.update_task_to_completed,
-                            task_id=task_id,
-                            miner_hotkey=miner_hotkey,
-                            file_info=file_info,
-                            completion_time=completion_time,
-                            completed_at=datetime.now(timezone.utc),
-                        )
-
-                        await self.validator.verification_manager.upload_miner_completed_task(
-                            task_id
-                        )
-
-                        completed_count += 1
-                    else:
-                        # File not available, still processing
-                        bt.logging.debug(
-                            f"Task {task_id} still processing by miner {miner_hotkey[:10] if miner_hotkey else 'None'}"
-                        )
-                        still_running_count += 1
+                    completed_tasks.append((task, video_url, file_info))
                 else:
-                    # No URL yet, still processing
-                    bt.logging.debug(
-                        f"Task {task_id} still processing by miner {miner_hotkey[:10] if miner_hotkey else 'None'} (no URL yet)"
-                    )
-                    still_running_count += 1
+                    still_processing_tasks.append(task)
 
-            # Record task status summary
-            if completed_count > 0 or failed_count > 0 or timeout_count > 0:
-                bt.logging.info(
-                    f"Task status update: completed={completed_count}, failed={failed_count}, timeout={timeout_count}, running={still_running_count}"
-                )
+            # Batch process completed tasks
+            if completed_tasks:
+                bt.logging.info(f"Processing {len(completed_tasks)} completed tasks")
+                await self._batch_process_completed_tasks(completed_tasks)
+
+            # Log still processing tasks
+            if still_processing_tasks:
+                bt.logging.info(f"{len(still_processing_tasks)} tasks still processing")
 
         except Exception as e:
-            bt.logging.error(f"Error checking active tasks: {str(e)}")
+            bt.logging.error(f"Error in batch URL availability check: {str(e)}")
+
+    async def _check_single_task_url(self, task, video_url):
+        """
+        Check URL availability for a single task
+        """
+        try:
+            # Use shorter timeout for better performance
+            return await check_url_resource_available(
+                video_url, get_file_info=True, timeout=10
+            )
+        except Exception as e:
+            bt.logging.error(f"Error checking URL for task {task['task_id']}: {str(e)}")
+            return False, {}
+
+    async def _batch_process_completed_tasks(self, completed_tasks):
+        """
+        Batch process completed tasks with concurrent downloads
+        """
+        try:
+            bt.logging.info(
+                f"Starting batch processing of {len(completed_tasks)} completed tasks"
+            )
+
+            db_update_tasks = []
+            completed_tasks_final = []
+            for task, video_url, file_info in completed_tasks:
+                task_id = task["task_id"]
+                miner_hotkey = task.get("miner_hotkey")
+
+                # Log completion
+                file_size = file_info.get("file_size", "unknown")
+                last_modified = file_info.get("last_modified", "")
+                bt.logging.info(
+                    f"Task {task_id} completed by miner {miner_hotkey[:10] if miner_hotkey else 'None'}, "
+                    f"file_size: {file_size}, last_modified: {last_modified}"
+                )
+
+                # Calculate completion time
+                completion_time = 0
+                last_sent_at = task.get("last_sent_at")
+                if last_modified and last_sent_at:
+                    if isinstance(last_sent_at, (int, float)):
+                        last_sent_at = datetime.fromtimestamp(
+                            last_sent_at, tz=timezone.utc
+                        )
+                    elif isinstance(last_sent_at, str):
+                        try:
+                            last_sent_at = datetime.fromisoformat(
+                                last_sent_at.replace("Z", "+00:00")
+                            )
+                        except:
+                            last_sent_at = None
+
+                    if last_sent_at:
+                        completion_time = (last_modified - last_sent_at).total_seconds()
+                        bt.logging.info(
+                            f"Task {task_id} completion time: {completion_time:.2f} seconds"
+                        )
+
+                completed_tasks_final.append(
+                    (
+                        {**task, "completion_time": completion_time},
+                        video_url,
+                        file_info,
+                    )
+                )
+
+                # Create database update task
+                db_update_tasks.append(
+                    self._db_op(
+                        self.db.update_task_to_completed,
+                        task_id=task_id,
+                        miner_hotkey=miner_hotkey,
+                        file_info=file_info,
+                        completion_time=completion_time,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                )
+
+            # Execute all database updates concurrently
+            bt.logging.info(f"Updating database for {len(db_update_tasks)} tasks")
+            await asyncio.gather(*db_update_tasks, return_exceptions=True)
+
+            # Batch download videos and upload completions concurrently in background thread
+            bt.logging.info(
+                f"Starting background downloads and uploads for {len(completed_tasks)} tasks"
+            )
+
+            # Start background thread for downloads and uploads
+            thread = threading.Thread(
+                target=self._run_downloads_and_uploads_in_thread,
+                args=(completed_tasks_final,),
+                daemon=True,
+            )
+            thread.start()
+
+            bt.logging.info(
+                f"Successfully processed {len(completed_tasks)} completed tasks"
+            )
+
+        except Exception as e:
+            bt.logging.error(f"Error in batch processing completed tasks: {str(e)}")
             bt.logging.error(traceback.format_exc())
+
+    def _run_downloads_and_uploads_in_thread(self, completed_tasks):
+        """
+        Run downloads and uploads in a separate thread to avoid blocking main thread
+        """
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                # Run the async download and upload operations
+                loop.run_until_complete(
+                    self._run_downloads_and_uploads_async(completed_tasks)
+                )
+            finally:
+                # Ensure event loop is properly closed
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.run_until_complete(loop.shutdown_default_executor())
+                loop.close()
+                # Reset thread event loop
+                asyncio.set_event_loop(None)
+
+        except Exception as e:
+            bt.logging.error(f"Error in download/upload thread: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    async def _run_downloads_and_uploads_async(self, completed_tasks):
+        """
+        Run downloads and uploads asynchronously
+        """
+        try:
+            # Create tasks for concurrent processing
+            download_and_upload_tasks = []
+            for task, video_url, file_info in completed_tasks:
+                task_id = task["task_id"]
+                download_and_upload_tasks.append(
+                    self._download_and_upload_single_task(task_id, video_url, task)
+                )
+
+            # Execute all downloads and uploads concurrently
+            bt.logging.info(
+                f"Executing {len(download_and_upload_tasks)} download/upload tasks in background"
+            )
+
+            results = await asyncio.gather(
+                *download_and_upload_tasks, return_exceptions=True
+            )
+
+            bt.logging.info(f"Background downloads and uploads completed: {results}")
+
+        except Exception as e:
+            bt.logging.error(f"Error in async download/upload processing: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    async def _download_and_upload_single_task(self, task_id, video_url, task):
+        """
+        Download and upload a single task
+        """
+        try:
+            # Download and extract package
+            success, extracted_dir_path, outputs_info = (
+                await self.validator.video_manager.download_and_extract_package(
+                    task_id, video_url, "miner"
+                )
+            )
+
+            if success:
+                # Get upload URLs
+                upload_urls = await get_result_upload_urls(
+                    self.validator.wallet, task_id, outputs_info
+                )
+                if upload_urls:
+                    # Upload files to each URL concurrently
+                    upload_tasks = []
+                    for upload_url in upload_urls:
+                        upload_tasks.append(
+                            self._upload_single_file(upload_url, extracted_dir_path)
+                        )
+
+                    # Execute all uploads concurrently
+                    await asyncio.gather(*upload_tasks, return_exceptions=True)
+
+                # Upload completion notification
+                await self.validator.verification_manager.upload_miner_completed_task(
+                    task_id, task
+                )
+
+            return True
+        except Exception as e:
+            bt.logging.error(f"Error in download/upload for task {task_id}: {str(e)}")
+            raise
+
+    async def _upload_single_file(self, upload_url, extracted_dir_path):
+        """
+        Upload a single file to the given URL
+        """
+        try:
+            parsed_url = urlparse(upload_url)
+            filename = os.path.basename(parsed_url.path)
+            file_path = os.path.join(extracted_dir_path, filename)
+            bt.logging.info(f"Uploading {file_path} to {upload_url}")
+
+            with open(file_path, "rb") as f:
+                data = f.read()
+
+            response_text, status_code = http_put_request_sync(
+                upload_url,
+                data=data,
+                headers={},
+                timeout=180,
+            )
+
+            if 200 <= status_code < 300:
+                bt.logging.info(f"Successfully uploaded to {upload_url}")
+            else:
+                bt.logging.error(
+                    f"Upload failed to {upload_url}, status: {status_code}, response: {response_text}"
+                )
+        except Exception as e:
+            bt.logging.error(f"Failed to upload to {upload_url}: {str(e)}")
+            raise
 
     async def _verify_completed_tasks(self):
         """Verify completed tasks"""
@@ -1186,7 +1253,11 @@ class TaskManager:
             max_capacity = self.validator.validator_config.verification[
                 "max_concurrent_verifications"
             ]
-            current_verifying = len(self.validator.verification_manager.verifying_tasks)
+            # Get current verifying tasks count with thread safety
+            with self.validator.verification_manager.verifying_tasks_lock:
+                current_verifying = len(
+                    self.validator.verification_manager.verifying_tasks
+                )
             available_capacity = max(0, max_capacity - current_verifying)
 
             # Get queue size
@@ -1200,9 +1271,28 @@ class TaskManager:
                 f"Verification capacity: {current_verifying}/{max_capacity}, available: {available_capacity}, queue: {queue_size}"
             )
 
-            # Calculate fetch capacity: max_capacity * 1.5 but not exceeding max_capacity
-            # If no available capacity but queue is empty, get at least 1 task
-            if available_capacity > 0 or queue_size == 0:
+            # Calculate how many tasks we can safely add to queue
+            max_safe_queue_size = max_capacity - current_verifying
+
+            # Calculate target queue size based on improved logic
+            idle_workers = max(0, max_capacity - current_verifying)
+            buffer_size = max(1, int(max_capacity * 0.5))
+            target_queue_size = min(idle_workers + buffer_size, max_safe_queue_size)
+
+            # Check if we need to add tasks to queue
+            should_add_tasks = queue_size < target_queue_size
+
+            # Calculate fetch capacity based on target queue size
+            fetch_capacity = target_queue_size - queue_size
+
+            bt.logging.debug(
+                f"Queue management: current={queue_size}, target={target_queue_size}, "
+                f"max_safe={max_safe_queue_size}, idle_workers={idle_workers}, "
+                f"buffer_size={buffer_size}, should_add={should_add_tasks}, "
+                f"fetch_capacity={fetch_capacity}"
+            )
+
+            if should_add_tasks:
                 # Use miner selection strategy based on verification density
                 sorted_tasks = (
                     self.validator.verification_manager.select_tasks_for_verification(
@@ -1210,15 +1300,12 @@ class TaskManager:
                     )
                 )
 
-                # Select task based on available capacity
-                max_over_capacity = max(1, int(max_capacity * 0.5))
-                fetch_capacity = min(max_capacity, max_over_capacity - queue_size)
                 task_count = min(fetch_capacity, len(sorted_tasks))
                 task_count = max(0, task_count) if sorted_tasks else 0
 
                 if task_count == 0:
                     bt.logging.info(
-                        f"No tasks to verify, skipping verification, max_over_capacity: {max_over_capacity}, queue_size: {queue_size}"
+                        f"No tasks to verify, skipping verification, buffer_size: {buffer_size}, queue_size: {queue_size}"
                     )
                     return
 
@@ -1235,41 +1322,42 @@ class TaskManager:
                     miner_hotkey = task["miner_hotkey"]
 
                     # Avoid adding task already in verification
-                    if (
-                        task_id
-                        not in self.validator.verification_manager.verifying_tasks
-                    ):
-                        try:
-                            # First update task status to "verifying" to prevent duplicate processing
-                            await self._db_op(
-                                self.db.update_task_status,
-                                task_id=task_id,
-                                status="verifying",
-                            )
+                    with self.validator.verification_manager.verifying_tasks_lock:
+                        if (
+                            task_id
+                            not in self.validator.verification_manager.verifying_tasks
+                        ):
+                            try:
+                                # First update task status to "verifying" to prevent duplicate processing
+                                await self._db_op(
+                                    self.db.update_task_status,
+                                    task_id=task_id,
+                                    status="verifying",
+                                )
 
-                            bt.logging.warning(
-                                f"Update the status of task {task_id} to verifying"
-                            )
-
-                            # Try to add task to verification queue
-                            success = self.validator.verification_manager.add_verification_task(
-                                {"task_id": task_id, "miner_hotkey": miner_hotkey}
-                            )
-
-                            if not success:
                                 bt.logging.warning(
-                                    f"Failed to add task {task_id} to verification queue"
-                                )
-                            else:
-                                bt.logging.debug(
-                                    f"Task {task_id} successfully added to verification queue"
+                                    f"Update the status of task {task_id} to verifying"
                                 )
 
-                        except Exception as e:
-                            bt.logging.error(
-                                f"Error managing verification for task {task_id}: {str(e)}"
-                            )
-                            bt.logging.error(traceback.format_exc())
+                                # Try to add task to verification queue
+                                success = self.validator.verification_manager.add_verification_task(
+                                    {"task_id": task_id, "miner_hotkey": miner_hotkey}
+                                )
+
+                                if not success:
+                                    bt.logging.warning(
+                                        f"Failed to add task {task_id} to verification queue"
+                                    )
+                                else:
+                                    bt.logging.debug(
+                                        f"Task {task_id} successfully added to verification queue"
+                                    )
+
+                            except Exception as e:
+                                bt.logging.error(
+                                    f"Error managing verification for task {task_id}: {str(e)}"
+                                )
+                                bt.logging.error(traceback.format_exc())
 
         except Exception as e:
             bt.logging.error(f"Error verifying completed tasks: {str(e)}")
@@ -1476,49 +1564,10 @@ class TaskManager:
                 error_info.update(details)
 
             await self.validator.verification_manager.upload_task(
-                task_id, miner_hotkey, 0, error_info, 0
+                task_id, miner_hotkey, 0, error_info, 0, is_error=True
             )
 
         return True
-
-    def add_task(self, workflow_params, timeout_seconds=600):
-        """
-        Add a new task
-
-        Args:
-            workflow_params: Workflow parameters
-            timeout_seconds: Timeout in seconds
-
-        Returns:
-            Task ID or None if failed
-        """
-        try:
-            # Create task
-            task = self.task_factory.create_task_from_params(
-                workflow_params, timeout_seconds
-            )
-            if not task:
-                bt.logging.error("Failed to create task")
-                return None
-
-            # Add to database
-            loop = asyncio.new_event_loop()
-            try:
-                success = loop.run_until_complete(self._db_op(self.db.add_task, task))
-            finally:
-                loop.close()
-
-            if not success:
-                bt.logging.error("Failed to add task to database")
-                return None
-
-            bt.logging.info(f"Added task {task.task_id}")
-            return task.task_id
-
-        except Exception as e:
-            bt.logging.error(f"Error adding task: {str(e)}")
-            bt.logging.error(traceback.format_exc())
-            return None
 
     def _handle_hotkey_change(self, old_hotkey, new_hotkey):
         """

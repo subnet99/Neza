@@ -11,7 +11,7 @@ class Task:
     def __init__(
         self,
         task_id: Optional[str] = None,
-        workflow_params: Dict[str, Any] = None,
+        complete_workflow: Dict[str, Any] = None,
         miner_uid: Optional[int] = None,
         miner_hotkey: Optional[str] = None,
         timeout_seconds: int = 600,
@@ -22,7 +22,7 @@ class Task:
 
         Args:
             task_id: Unique task ID (generated if not provided)
-            workflow_params: Workflow parameters for the task
+            complete_workflow: Complete workflow configuration for the task
             miner_uid: UID of the miner assigned to the task
             miner_hotkey: Hotkey of the miner assigned to the task
             timeout_seconds: Task timeout in seconds
@@ -32,7 +32,7 @@ class Task:
         self.task_id = task_id or str(uuid.uuid4())
 
         # Task parameters
-        self.workflow_params = workflow_params or {}
+        self.complete_workflow = complete_workflow or {}
         self.miner_uid = miner_uid
         self.miner_hotkey = miner_hotkey
         self.timeout_seconds = timeout_seconds
@@ -63,7 +63,7 @@ class Task:
         """
         return {
             "task_id": self.task_id,
-            "workflow_params": self.workflow_params,
+            "complete_workflow": self.complete_workflow,
             "miner_uid": self.miner_uid,
             "miner_hotkey": self.miner_hotkey,
             "timeout_seconds": self.timeout_seconds,
@@ -92,7 +92,7 @@ class Task:
         """
         task = cls(
             task_id=data.get("task_id"),
-            workflow_params=data.get("workflow_params"),
+            complete_workflow=data.get("complete_workflow"),
             miner_uid=data.get("miner_uid"),
             miner_hotkey=data.get("miner_hotkey"),
             timeout_seconds=data.get("timeout_seconds", 600),

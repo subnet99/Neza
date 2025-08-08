@@ -9,6 +9,10 @@ from datetime import datetime
 import bittensor as bt
 import asyncio
 from datetime import timedelta
+import zipfile
+import json
+import traceback
+from neza.utils.tools import get_file_type
 
 
 class VideoManager:
@@ -29,90 +33,235 @@ class VideoManager:
             self.clean_old_video_cache()
             bt.logging.info(f"Cleaned old video cache on block {block}")
 
-    async def download_video(self, task_id, video_url, video_type):
+    async def download_and_extract_package(self, task_id, package_url, package_type):
         """
-        Download video from URL to cache directory
+        Download and extract package from URL to cache directory
 
         Args:
             task_id: Task ID
-            video_url: URL to video
-            video_type: Type of video ('miner' or 'validator')
+            package_url: URL to package (zip file)
+            package_type: Type of package ('miner' or 'validator')
 
         Returns:
-            tuple: (success, video_path) where success is a boolean and video_path is the path to the downloaded video
+            tuple: (success, extracted_dir_path, outputs_info) where:
+                - success is a boolean
+                - extracted_dir_path is the path to the extracted directory
+                - outputs_info is the parsed outputs.json content
         """
-        # Get target path based on video type
-        target_path = self.get_video_cache_paths(task_id, video_type, False)
+        try:
+            # Get target paths
+            zip_path, extracted_dir = self.get_package_cache_paths(
+                task_id, package_type, False
+            )
 
-        # Check if video already exists
-        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
             bt.logging.info(
-                f"{video_type.capitalize()} video already exists for task {task_id}: {target_path}"
+                f"task_id: {task_id}, zip_path: {zip_path}, extracted_dir: {extracted_dir}"
             )
-            return True, target_path
 
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 
-        # Download video directly
-        bt.logging.info(f"Downloading {video_type} video for task {task_id}")
+            # Download package
+            bt.logging.info(f"Downloading {package_type} package for task {task_id}")
 
-        loop = asyncio.get_event_loop()
-        download_success = await loop.run_in_executor(
-            None, self.download_url_video, video_url, target_path
-        )
+            download_success = self.download_url_video(package_url, zip_path)
+            if (
+                not download_success
+                or not os.path.exists(zip_path)
+                or os.path.getsize(zip_path) == 0
+            ):
+                bt.logging.warning(
+                    f"Download failed for {package_type} package, task {task_id}. "
+                    f"Success: {download_success}, exists: {os.path.exists(zip_path)}, "
+                    f"size: {os.path.getsize(zip_path) if os.path.exists(zip_path) else 'N/A'}"
+                )
+                return False, extracted_dir, None
 
-        if (
-            download_success
-            and os.path.exists(target_path)
-            and os.path.getsize(target_path) > 0
-        ):
+            bt.logging.info(f"Extracting {package_type} package for task {task_id}")
+
+            extract_success = self.extract_package(zip_path, extracted_dir)
+
+            if not extract_success:
+                bt.logging.warning(
+                    f"Extraction failed for {package_type} package, task {task_id}"
+                )
+                return False, extracted_dir, None
+
+            # Load outputs.json
+            outputs_info = self.load_outputs_json(extracted_dir)
+            if outputs_info is None:
+                bt.logging.warning(
+                    f"No outputs.json found in {package_type} package, task {task_id}"
+                )
+                return False, extracted_dir, None
+
             bt.logging.info(
-                f"Download successful for {video_type} video, task {task_id}, saved to {target_path}"
+                f"Package download and extraction successful for {package_type}, task {task_id}, extracted to {extracted_dir}"
             )
-            return True, target_path
-        else:
-            bt.logging.warning(
-                f"Download failed for {video_type} video, task {task_id}"
-            )
-            return False, target_path
+            return True, extracted_dir, outputs_info
+        except Exception as e:
+            bt.logging.error(f"Error downloading and extracting package: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return False, None, None
 
-    def get_video_cache_paths(self, task_id, video_type=None, is_find=False):
+    def get_video_cache_paths(
+        self, task_id, video_type=None, is_find=False, file_type: str = ""
+    ):
         """
         Generate video cache paths
 
         Args:
             task_id: Task ID
             video_type: Optional, type of video ('miner' or 'validator')
+            file_type: Optional, type of file ('.mp4', '.zip', etc.)
 
         Returns:
-            If video_type is None:
-                tuple: (cache_dir, miner_video_path, validator_video_path)
-            If video_type is specified:
-                str: Path to the specified video type
+            str: Path to the video file
         """
 
-        # Generate miner and validator video paths
-        miner_video_path = self.find_video_file(task_id, video_type, is_find, 1)
-        validator_video_path = self.find_video_file(task_id, video_type, is_find, 1)
-
-        # Return specific path if video_type is specified
         if video_type == "miner":
+            miner_video_path = self.find_video_file(
+                task_id, video_type, is_find, 1, file_type
+            )
             return miner_video_path
         elif video_type == "validator":
+            validator_video_path = self.find_video_file(
+                task_id, video_type, is_find, 1, file_type
+            )
             return validator_video_path
 
-        # Return all paths by default
-        return miner_video_path, validator_video_path
+        return ""
 
-    def find_video_file(self, task_id, video_type, is_find=False, days_to_back=1):
+    def get_package_cache_paths(self, task_id, package_type=None, is_find=False):
+        """
+        Generate package cache paths
+
+        Args:
+            task_id: Task ID
+            package_type: Optional, type of package ('miner' or 'validator')
+
+        Returns:
+            tuple: (zip_path, extracted_dir_path)
+        """
+        if not package_type:
+            return None, None
+
+        extracted_dir = self.get_video_cache_paths(task_id, package_type, is_find)
+        # Generate zip and extracted directory paths
+        zip_path = os.path.join(extracted_dir, f"miner.zip")
+
+        return zip_path, extracted_dir
+
+    def extract_package(self, zip_path, extract_dir):
+        """
+        Extract zip package to directory
+
+        Args:
+            zip_path: Path to zip file
+            extract_dir: Directory to extract to
+
+        Returns:
+            bool: Whether extraction was successful
+        """
+        try:
+            # Create extraction directory
+            os.makedirs(extract_dir, exist_ok=True)
+
+            # Extract zip file
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(extract_dir)
+
+            return True
+        except Exception as e:
+            bt.logging.error(f"Error extracting package: {str(e)}")
+            return False
+
+    def load_outputs_json(self, extracted_dir):
+        """
+        Load and parse outputs.json from extracted directory
+
+        Args:
+            extracted_dir: Path to extracted directory
+
+        Returns:
+            dict: Parsed outputs.json content or None if not found
+        """
+        try:
+            outputs_path = os.path.join(extracted_dir, "outputs.json")
+            if not os.path.exists(outputs_path):
+                bt.logging.warning(f"outputs.json not found in {extracted_dir}")
+                return None
+
+            with open(outputs_path, "r") as f:
+                outputs_data = json.load(f)
+
+            return outputs_data
+        except Exception as e:
+            bt.logging.error(f"Error loading outputs.json: {str(e)}")
+            return None
+
+    def get_files_from_outputs(self, outputs_info, extracted_dir, file_types=None):
+        """
+        Get file paths from outputs.json based on file types
+
+        Args:
+            outputs_info: Parsed outputs.json content
+            extracted_dir: Path to extracted directory
+            file_types: List of file types to filter (e.g., ['images', 'audio', 'video', 'gifs'])
+
+        Returns:
+            dict: Mapping of node_id -> {file_type -> [file_paths]}
+        """
+        try:
+            files_mapping = {}
+
+            for node_id, node_output in outputs_info.items():
+
+                for output_type, file_list in node_output.items():
+                    # Filter by file types if specified
+                    if file_types and output_type not in file_types:
+                        continue
+
+                    file_paths = []
+                    for file_info in file_list:
+                        filename = file_info.get("filename")
+                        if filename:
+                            # Use the actual naming format from batch_download_outputs
+                            save_filename = f"{node_id}_{output_type}_{filename}"
+                            # Construct full path to extracted file
+                            file_path = os.path.join(extracted_dir, save_filename)
+
+                            if os.path.exists(file_path):
+                                file_paths.append(
+                                    {
+                                        "base_name": filename,
+                                        "file_name": save_filename,
+                                        "file_path": file_path,
+                                        "file_type": output_type,
+                                        "file_type_og": get_file_type(
+                                            file_info.get("format", ""), filename
+                                        ),
+                                    }
+                                )
+
+                    if file_paths:
+                        files_mapping[f"{node_id}_{output_type}"] = file_paths
+
+            return files_mapping
+        except Exception as e:
+            bt.logging.error(f"Error getting files from outputs: {str(e)}")
+            return {}
+
+    def find_video_file(
+        self, task_id, video_type, is_find=False, days_to_back=1, file_type: str = ""
+    ):
         """
         Find video file in cache directory
         """
         date_str = datetime.now().strftime("%Y%m%d")
         date_dir = os.path.join(self.video_cache_dir, date_str)
         task_dir = os.path.join(date_dir, task_id)
-        today_video_path = os.path.join(task_dir, f"{video_type}.mp4")
+        today_video_path = os.path.join(task_dir, f"{video_type}{file_type}")
 
         if not is_find:
             return today_video_path
@@ -125,7 +274,9 @@ class VideoManager:
             )
             yesterday_dir = os.path.join(self.video_cache_dir, yesterday_str)
             yesterday_task_dir = os.path.join(yesterday_dir, task_id)
-            yesterday_video_path = os.path.join(yesterday_task_dir, f"{video_type}.mp4")
+            yesterday_video_path = os.path.join(
+                yesterday_task_dir, f"{video_type}{file_type}"
+            )
             return yesterday_video_path
 
     def clean_old_video_cache(self, days=7):

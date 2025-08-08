@@ -13,6 +13,9 @@ import requests
 import traceback
 import json
 import email.utils
+import zipfile
+import shutil
+import urllib.parse
 
 # Load environment variables
 load_dotenv()
@@ -180,7 +183,7 @@ def generate_signature_message(body, exclude_fields=None):
 
     def format_value(value: Any) -> str:
         if isinstance(value, (dict, list, bool)) or value is None:
-            return json.dumps(value, separators=(",", ":"))
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         return str(value)
 
     return "&".join(f"{key}={format_value(value)}" for key, value in sorted_items)
@@ -203,9 +206,6 @@ async def request_upload_url(validator_wallet, task_id=None):
 
         # Try to get server time
         timestamp = int(time.time())
-        bt.logging.debug(
-            f"Using timestamp: {timestamp}, formatted time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}"
-        )
 
         # Prepare request body
         body = {
@@ -229,7 +229,7 @@ async def request_upload_url(validator_wallet, task_id=None):
         api_url = f"{owner_host}/v1/validator/upload-url"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-        bt.logging.info(f"Requesting upload URL: {api_url}")
+        bt.logging.info(f"Requesting upload URL: /upload-url")
         # bt.logging.debug(f"Request body: {body}")
 
         async with aiohttp.ClientSession() as session:
@@ -252,6 +252,49 @@ async def request_upload_url(validator_wallet, task_id=None):
         return None
 
 
+async def get_result_upload_urls(validator_wallet, task_id, outputs_info):
+    """
+    Get result file upload URLs
+    """
+    try:
+        # Get API URL from environment variables
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return None
+
+        body = {
+            "validator_hotkey": validator_wallet.hotkey.ss58_address,
+            "task_id": task_id,
+            "timestamp": int(time.time()),
+            "outputs": outputs_info,
+        }
+
+        message = generate_signature_message(body)
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        body["validator_signature"] = signature
+
+        api_url = f"{owner_host}/v1/validator/batch-upload-url"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=body, headers=headers, timeout=30
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result
+                else:
+                    error_text = await response.text()
+                    bt.logging.error(
+                        f"Failed to get result upload URLs: status code {response.status}, error: {error_text}"
+                    )
+                    return None
+    except Exception as e:
+        bt.logging.error(f"Error getting result upload URLs: {str(e)}")
+        return None
+
+
 async def upload_task_result(
     task_id,
     validator_wallet,
@@ -259,7 +302,7 @@ async def upload_task_result(
     score,
     verification_result,
     processing_time,
-    task_details,
+    is_error=False,
 ):
     """
     Upload task result to server
@@ -270,7 +313,7 @@ async def upload_task_result(
         score: Task score
         verification_result: Verification result details
         processing_time: Processing time
-        task_details: Task details
+        is_error: Whether the task is failed
     """
     try:
         # Get API URL from environment variables
@@ -281,9 +324,6 @@ async def upload_task_result(
 
         # Get current timestamp
         timestamp = int(time.time())
-        bt.logging.debug(
-            f"Using timestamp: {timestamp}, formatted time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}"
-        )
 
         # Prepare request body
         body = {
@@ -297,11 +337,8 @@ async def upload_task_result(
             "frame_rate": 23,
             "score": score,
             "score_detail": verification_result,
-            "task_detail": (
-                json.loads(json.dumps(task_details, default=str))
-                if task_details
-                else {}
-            ),
+            "task_detail": None,
+            "is_failed": is_error,
             "timestamp": timestamp,
         }
 
@@ -320,8 +357,7 @@ async def upload_task_result(
         api_url = f"{owner_host}/v1/validator/record-task"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-        bt.logging.info(f"Uploading task result: {api_url}")
-        # bt.logging.debug(f"Request body: {body}")
+        bt.logging.info(f"Uploading task result {task_id}")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -360,8 +396,9 @@ async def upload_miner_completion(
 
         # Get current timestamp
         timestamp = int(time.time())
-        bt.logging.debug(
-            f"Using timestamp: {timestamp}, formatted time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))}"
+
+        bt.logging.info(
+            f"Uploading miner completion {task_id} completion time {task_details['completion_time']}"
         )
 
         body = {
@@ -373,11 +410,7 @@ async def upload_miner_completion(
             "duration": 3,
             "processing_time": task_details["completion_time"],
             "frame_rate": 23,
-            "task_detail": (
-                json.loads(json.dumps(task_details, default=str))
-                if task_details
-                else {}
-            ),
+            "task_detail": None,
             "timestamp": timestamp,
         }
 
@@ -395,7 +428,7 @@ async def upload_miner_completion(
         api_url = f"{owner_host}/v1/validator/record-miner-completion"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-        bt.logging.info(f"Uploading miner completion: {api_url}")
+        bt.logging.info(f"Uploading miner completion: /record-miner-completion")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -700,9 +733,6 @@ def check_get_url_resource_available_sync(url, get_file_info=False, timeout=10):
                 parsed_date = email.utils.parsedate_to_datetime(last_modified_str)
                 if parsed_date:
                     file_info["last_modified"] = parsed_date
-                    bt.logging.debug(
-                        f"Converted Last-Modified to datetime: {parsed_date}"
-                    )
             except Exception as e:
                 bt.logging.warning(
                     f"Failed to parse Last-Modified date: {last_modified_str}, error: {str(e)}"
@@ -758,3 +788,228 @@ def get_consensus_scores_sync():
         bt.logging.error(f"Error getting consensus scores: {str(e)}")
         bt.logging.error(traceback.format_exc())
         return None
+
+
+def batch_download_outputs(
+    outputs: dict, comfy_url: str, out_dir: str, timeout: int = 120
+) -> list[str]:
+    """
+    Batch download all output files from ComfyUI, rename by node
+    """
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        downloaded_files = []
+
+        # Download all output files and rename by node
+        for node, node_output in outputs.items():
+            for key in node_output:
+                for fileinfo in node_output[key]:
+                    filename = fileinfo.get("filename")
+                    file_type = fileinfo.get("type")
+                    subfolder = fileinfo.get("subfolder")
+                    if not filename:
+                        continue
+
+                    file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={urllib.parse.quote(subfolder)}"
+                    response, status_code = http_get_request_sync(
+                        file_url, timeout=timeout
+                    )
+
+                    if status_code == 200 and response:
+                        # Rename file by node
+                        local_name = f"{out_dir}/{node}_{key}_{filename}"
+                        os.makedirs(os.path.dirname(local_name), exist_ok=True)
+                        with open(local_name, "wb") as f:
+                            f.write(response)
+                        downloaded_files.append(
+                            {
+                                "node": node,
+                                "key": key,
+                                "filename": filename,
+                                "local_name": local_name,
+                                "out_dir": out_dir,
+                            }
+                        )
+                        bt.logging.info(
+                            f"Downloaded: {node}_{filename} to {local_name}"
+                        )
+                    else:
+                        bt.logging.warning(
+                            f"Failed to download {filename}: status {status_code}"
+                        )
+
+        if not downloaded_files:
+            return None
+
+        # Save outputs.json
+        outputs_json_path = f"{out_dir}/outputs.json"
+        with open(outputs_json_path, "w") as f:
+            json.dump(outputs, f, indent=2)
+        downloaded_files.append(
+            {
+                "node": "outputs",
+                "key": "json",
+                "filename": "outputs.json",
+                "local_name": outputs_json_path,
+                "out_dir": out_dir,
+            }
+        )
+
+        return downloaded_files
+    except Exception as e:
+        bt.logging.error(f"Error in batch download outputs: {str(e)}")
+        bt.logging.error(traceback.format_exc())
+        return None
+
+
+def batch_download_and_package_outputs(
+    outputs: dict,
+    comfy_url: str,
+    task_id: str,
+    upload_url: str = None,
+    timeout: int = 120,
+) -> tuple[bool, str, str]:
+    """
+    Batch download all output files from ComfyUI, rename by node, package with outputs.json and upload
+
+    Args:
+        outputs: Outputs dict from ComfyUI history
+        comfy_url: ComfyUI server URL (e.g., "http://127.0.0.1:8188")
+        task_id: Task ID for naming
+        upload_url: Optional upload URL for the final zip
+        timeout: Download timeout in seconds
+
+    Returns:
+        tuple[bool, str, str]: (success, zip_path, error_message)
+    """
+
+    try:
+        # Create temporary directory for files
+        out_dir = f"tmp_tasks/{task_id}"
+
+        downloaded_files = batch_download_outputs(outputs, comfy_url, out_dir, timeout)
+        if not downloaded_files:
+            return False, "", "No files were successfully downloaded"
+
+        # Create zip file
+        zip_path = f"{out_dir}.zip"
+        with zipfile.ZipFile(zip_path, "w") as zipf:
+            for file in downloaded_files:
+                zipf.write(
+                    file["local_name"], arcname=os.path.basename(file["local_name"])
+                )
+
+        bt.logging.info(
+            f"Created zip package: {zip_path} with {len(downloaded_files)} files"
+        )
+
+        # Upload if URL provided
+        if upload_url:
+            with open(zip_path, "rb") as f:
+                data = f.read()
+
+            for attempt in range(3):
+                resp_text, status_code = http_put_request_sync(
+                    upload_url, data=data, headers={}, timeout=180
+                )
+                if status_code in [200, 201, 204]:
+                    bt.logging.info(f"Zip uploaded successfully for task {task_id}")
+                    break
+                else:
+                    bt.logging.error(
+                        f"Upload attempt {attempt + 1} failed: {status_code}, {resp_text}"
+                    )
+                    if attempt < 2:
+                        time.sleep(5)
+            else:
+                bt.logging.error(f"Failed to upload zip after 3 attempts")
+
+        return True, zip_path, ""
+
+    except Exception as e:
+        error_msg = f"Error in batch download and package: {str(e)}"
+        bt.logging.error(error_msg)
+        bt.logging.error(traceback.format_exc())
+        return False, "", error_msg
+
+
+def cleanup_task_files(task_id: str):
+    """
+    Cleanup task files
+
+    Args:
+        task_id: Task ID
+    """
+    # Clean up temporary directory
+    task_dir = f"tmp_tasks/{task_id}"
+    if os.path.exists(task_dir):
+        shutil.rmtree(task_dir)
+        bt.logging.info(f"Cleaned up temporary directory for task {task_id}")
+
+    # Clean up zip file
+    zip_path = f"tmp_tasks/{task_id}.zip"
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
+        bt.logging.info(f"Cleaned up zip file for task {task_id}")
+
+
+async def get_online_task_count(validator_wallet, count=1):
+    """
+    Get task count from online API
+
+    Args:
+        validator_wallet: Validator wallet
+        count: Number of tasks to request
+
+    Returns:
+        int: Number of tasks available from online API
+    """
+    try:
+        # Get API URL from environment variables
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return 0, []
+
+        # Get current timestamp
+        timestamp = int(time.time())
+
+        # Prepare request body
+        body = {
+            "validator_hotkey": validator_wallet.hotkey.ss58_address,
+            "timestamp": timestamp,
+            "count": count,  # Request specified number of tasks
+        }
+
+        # Generate signature message
+        exclude_fields = ["validator_signature"]
+        message = generate_signature_message(body, exclude_fields)
+
+        # Sign with wallet
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        body["validator_signature"] = signature
+
+        # Make API request
+        api_url = f"{owner_host}/v1/validator/get-tasks"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        bt.logging.debug(f"Requesting task count : {count}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=body, headers=headers, timeout=30
+            ) as response:
+
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("count", 0), result.get("tasks", [])
+                else:
+                    error_text = await response.text()
+                    bt.logging.error(
+                        f"Failed to get task count from online API: status code {response.status}, error: {error_text}"
+                    )
+                    return 0, []
+    except Exception as e:
+        bt.logging.error(f"Error getting task count from online API: {str(e)}")
+        bt.logging.error(traceback.format_exc())
+        return 0, []

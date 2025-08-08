@@ -39,6 +39,9 @@ class BaseNeuron(ABC):
     substrate_thread: Optional[threading.Thread] = None
     substrate: Optional[SubstrateInterface] = None
 
+    # WebSocket lock for concurrency control
+    _subtensor_lock = None
+
     # Substrate configuration constants
     SUBSTRATE_SS58_FORMAT = 42  # Bittensor SS58 format
     SUBSTRATE_TYPE_REGISTRY = None  # Use default type registry
@@ -67,6 +70,9 @@ class BaseNeuron(ABC):
 
         # Initialize block callback list
         self.block_callbacks = []
+
+        # Initialize WebSocket lock - use Lock instead of RLock for better concurrency control
+        self._subtensor_lock = threading.Lock()
 
         # Set up logging with the provided configuration.
         bt.logging.set_config(config=self.config.logging)
@@ -222,7 +228,8 @@ class BaseNeuron(ABC):
         # Ensure miner or validator hotkey is still registered on the network
         self.check_registered()
         bt.logging.info("Resyncing metagraph")
-        self.metagraph.sync(subtensor=self.subtensor)
+        with self._subtensor_lock:
+            self.metagraph.sync(subtensor=self.subtensor)
         return True
 
     def register_all_block_callbacks(self):
@@ -257,15 +264,19 @@ class BaseNeuron(ABC):
 
     def check_registered(self):
         # --- Check for registration.
-        if not self.subtensor.is_hotkey_registered(
-            netuid=self.config.netuid,
-            hotkey_ss58=self.wallet.hotkey.ss58_address,
-        ):
-            bt.logging.error(
-                f"Wallet: {self.wallet} is not registered on netuid {self.config.netuid}."
-                f" Please register the hotkey using `btcli subnets register` before trying again"
-            )
-            exit()
+        bt.logging.debug(
+            f"[WebSocket] check_registered() - Thread: {threading.current_thread().name} (Total threads: {threading.active_count()})"
+        )
+        with self._subtensor_lock:
+            if not self.subtensor.is_hotkey_registered(
+                netuid=self.config.netuid,
+                hotkey_ss58=self.wallet.hotkey.ss58_address,
+            ):
+                bt.logging.error(
+                    f"Wallet: {self.wallet} is not registered on netuid {self.config.netuid}."
+                    f" Please register the hotkey using `btcli subnets register` before trying again"
+                )
+                exit()
 
     def should_sync_metagraph(self):
         """

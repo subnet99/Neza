@@ -26,6 +26,7 @@ class VerificationManager:
         # Verification queue and task tracking
         self.verification_queue = queue.Queue()
         self.verifying_tasks = set()  # Set of task IDs currently being verified
+        self.verifying_tasks_lock = threading.Lock()  # Thread lock for verifying_tasks
         self.verification_workers = []  # List of verification worker tasks
 
         # Verification cycle management
@@ -278,13 +279,16 @@ class VerificationManager:
                 miner_uid = self._get_miner_uid(miner_hotkey)
 
                 # Skip if already being verified
-                if task_id in self.verifying_tasks:
-                    bt.logging.debug(f"Task {task_id} already being verified, skipping")
-                    self.verification_queue.task_done()
-                    continue
+                with self.verifying_tasks_lock:
+                    if task_id in self.verifying_tasks:
+                        bt.logging.debug(
+                            f"Task {task_id} already being verified, skipping"
+                        )
+                        self.verification_queue.task_done()
+                        continue
 
-                # Mark as being verified
-                self.verifying_tasks.add(task_id)
+                    # Mark as being verified
+                    self.verifying_tasks.add(task_id)
 
                 # Execute verification
                 bt.logging.info(
@@ -343,8 +347,9 @@ class VerificationManager:
                         self.verified_task_counts[miner_hotkey] = 1
 
                     # Remove from verifying tasks
-                    if task_id in self.verifying_tasks:
-                        self.verifying_tasks.remove(task_id)
+                    with self.verifying_tasks_lock:
+                        if task_id in self.verifying_tasks:
+                            self.verifying_tasks.remove(task_id)
 
                     # Mark task as done in queue
                     self.verification_queue.task_done()
@@ -457,33 +462,12 @@ class VerificationManager:
             raise
 
     async def _get_task_details(self, task_id):
-        """
-        Gets task details from database
-
-        Args:
-            task_id: Task ID to get details for
-
-        Returns:
-            Dict with task details or None if not found
-        """
+        """Get task details from database"""
         try:
-            # Get task from database
             task = await self.validator.task_manager.db.get_task(task_id)
-
-            if not task:
-                bt.logging.warning(f"Task {task_id} not found in database")
-                return None
-
-            # Check if task has result URL
-            if not task.get("s3_video_url"):
-                bt.logging.warning(f"Task {task_id} has no video URL")
-                return None
-
             return task
-
         except Exception as e:
-            bt.logging.error(f"Error getting task details for {task_id}: {str(e)}")
-            bt.logging.error(traceback.format_exc())
+            bt.logging.error(f"Error getting task details: {str(e)}")
             return None
 
     async def _verify_task(self, task_details, worker_id):
@@ -586,8 +570,8 @@ class VerificationManager:
             # Log verification
             bt.logging.info(f"Verifying task {task_id}")
 
-            # Use video verifier
-            score, result = await self.validator.verifier.verify_task(
+            # Use verifier
+            score, result = await self.validator.verifier.verify_task_with_package(
                 task_id=task_id,
                 complete_workflow=complete_workflow,
                 completion_time=completion_time,
@@ -742,7 +726,12 @@ class VerificationManager:
                     )
 
                 await self.upload_task(
-                    task_id, miner_hotkey, 0, {"error": "Verification failed"}, 0
+                    task_id,
+                    miner_hotkey,
+                    0,
+                    {"error": "Verification failed"},
+                    0,
+                    is_error=True,
                 )
             else:
                 bt.logging.info(
@@ -952,50 +941,34 @@ class VerificationManager:
             )
             bt.logging.error(traceback.format_exc())
 
-    async def upload_task(self, task_id, miner_hotkey, score, metrics, completion_time):
-        # Get task details for upload
-        task_details = await self.validator.task_manager._db_op(
-            self.validator.task_manager.db.get_task, task_id=task_id
-        )
+    async def upload_task(
+        self,
+        task_id,
+        miner_hotkey,
+        score,
+        metrics,
+        completion_time,
+        is_error=False,
+    ):
+        try:
+            await upload_task_result(
+                task_id=task_id,
+                validator_wallet=self.validator.wallet,
+                miner_hotkey=miner_hotkey,
+                score=score,
+                verification_result=metrics,
+                processing_time=completion_time,
+                is_error=is_error,
+            )
+            bt.logging.info(
+                f"Task result for {task_id} uploaded to dashboard successfully"
+            )
+        except Exception as e:
+            bt.logging.error(f"Failed to upload task result to dashboard: {str(e)}")
+            bt.logging.error(traceback.format_exc())
 
-        # Upload task result to owner
-        if task_details:
-            try:
-                # Upload task result
-                await upload_task_result(
-                    task_id=task_id,
-                    validator_wallet=self.validator.wallet,
-                    miner_hotkey=miner_hotkey,
-                    score=score,
-                    verification_result=metrics,
-                    processing_time=completion_time,
-                    task_details=task_details,
-                )
-                bt.logging.info(
-                    f"Task result for {task_id} uploaded to dashboard successfully"
-                )
-            except Exception as e:
-                bt.logging.error(f"Failed to upload task result to dashboard: {str(e)}")
-                bt.logging.error(traceback.format_exc())
-
-    async def upload_miner_completed_task(self, task_id):
-        # Get task details for upload
-        task_details = await self.validator.task_manager._db_op(
-            self.validator.task_manager.db.get_task, task_id=task_id
-        )
+    async def upload_miner_completed_task(self, task_id, task_detail):
 
         # Upload miner completion to owner
-        if task_details:
-            try:
-                # Upload miner completion
-                await upload_miner_completion(
-                    task_id, self.validator.wallet, task_details
-                )
-                bt.logging.info(
-                    f"Miner completion for {task_id} uploaded to dashboard successfully"
-                )
-            except Exception as e:
-                bt.logging.error(
-                    f"Failed to upload miner completion to dashboard: {str(e)}"
-                )
-                bt.logging.error(traceback.format_exc())
+        if task_detail:
+            await upload_miner_completion(task_id, self.validator.wallet, task_detail)

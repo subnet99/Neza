@@ -263,8 +263,7 @@ class MinerScoreManager:
             )
 
             self.add_score(uid, score)
-            # Always save cache after recording a score
-            self.save_cache()
+            # Cache is automatically saved by add_score when always_save_cache is True
         else:
             bt.logging.warning(
                 f"Unable to record score for hotkey {hotkey[:10]}... corresponding UID not found."
@@ -283,9 +282,7 @@ class MinerScoreManager:
                         f"Adding score {score_str} for UID {uid} after fixing mapping"
                     )
                     self.add_score(uid, score)
-
-                    # Always save cache after recording a score
-                    self.save_cache()
+                    # Cache is automatically saved by add_score when always_save_cache is True
                     return
 
             bt.logging.error(
@@ -520,7 +517,7 @@ class MinerScoreManager:
             with open(self.cache_file, "w") as file:
                 json.dump(data, file)
 
-            bt.logging.info(f"Successfully saved scores to {self.cache_file}")
+            bt.logging.info(f"Successfully saved scores file")
 
         except Exception as e:
             bt.logging.error(f"Failed to save cache: {str(e)}")

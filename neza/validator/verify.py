@@ -5,17 +5,15 @@ from imagebind.models.imagebind_model import ModalityType
 import torch.nn.functional as F
 import bittensor as bt
 import os
-import tempfile
-import uuid
-import shutil
 import requests
 from urllib.parse import urlparse
 import time
 import threading
 import queue
-from neza.api.comfy_api import ComfyAPI
+from neza.api.comfy_ws_api import ComfyWSAPI
 from neza.utils.misc import copy_audio_wav
 import traceback
+from neza.utils.http import batch_download_outputs
 
 
 class VideoVerifier:
@@ -36,7 +34,17 @@ class VideoVerifier:
         """Initialize video verifier"""
         self.model, self.device = self._get_model()
         self.validator = validator
-        self.comfy_api = ComfyAPI(validator.validator_config.comfy_servers, True)
+
+        # Create single ComfyWSAPI instance for all servers
+        self.comfy_api = ComfyWSAPI(
+            validator.validator_config.comfy_servers, clear_queue=True
+        )
+
+        bt.logging.info(
+            f"Created ComfyWSAPI instance with {len(self.comfy_api.servers)} servers"
+        )
+        for i, server in enumerate(self.comfy_api.servers):
+            bt.logging.info(f"  worker_{i} -> ****:{server['port']}")
 
         if (
             VideoVerifier._verification_thread is None
@@ -52,8 +60,8 @@ class VideoVerifier:
             bt.logging.info("Started video verification queue processor thread")
 
     def _process_verification_queue(self):
-        """Process verification queue thread function"""
-        bt.logging.info("Video verification queue processor started")
+        """Process verification queue thread function - sequential processing for single model"""
+        bt.logging.info("Verification queue processor started (sequential mode)")
         while not VideoVerifier._stop_thread:
             try:
                 # Get verification task from queue, with timeout of 5 seconds
@@ -63,32 +71,96 @@ class VideoVerifier:
                     continue
 
                 # Unpack task parameters
-                args, kwargs, result_container = task
+                task_type, args = task
 
-                # Execute actual verification
-                try:
-                    with VideoVerifier._verification_lock:
-                        bt.logging.info("Processing video verification task")
-                        result = self._verify_videos_impl(*args, **kwargs)
-                        result_container["result"] = result
-                        result_container["error"] = None
-                except Exception as e:
-                    bt.logging.error(f"Error in verification queue processor: {str(e)}")
-                    bt.logging.error(traceback.format_exc())
-                    result_container["result"] = (0.0, {"error": str(e)})
-                    result_container["error"] = e
-                finally:
-                    # Mark task as completed
-                    result_container["completed"] = True
-                    # Notify queue that task is done
-                    VideoVerifier._verification_queue.task_done()
+                # Process all tasks sequentially with the same lock to ensure only one model operation at a time
+                with VideoVerifier._verification_lock:
+                    try:
+                        if task_type == "video":
+                            # Handle video verification
+                            (
+                                validator_video_path,
+                                miner_video_path,
+                                validator_execution_time,
+                                completion_time,
+                                result_container,
+                            ) = args
+
+                            bt.logging.info("Processing video verification task")
+                            result = self._verify_videos_impl(
+                                validator_video_path, miner_video_path
+                            )
+                            result_container["result"] = result
+                            result_container["error"] = None
+
+                        elif task_type == "image":
+                            # Handle image verification
+                            (
+                                validator_image_path,
+                                miner_image_path,
+                                validator_execution_time,
+                                completion_time,
+                                result_container,
+                            ) = args
+
+                            bt.logging.info("Processing image verification task")
+                            result = self._verify_images_impl(
+                                validator_image_path, miner_image_path
+                            )
+                            result_container["result"] = result
+                            result_container["error"] = None
+
+                        elif task_type == "audio":
+                            # Handle audio verification
+                            (
+                                validator_audio_path,
+                                miner_audio_path,
+                                validator_execution_time,
+                                completion_time,
+                                result_container,
+                            ) = args
+
+                            bt.logging.info("Processing audio verification task")
+                            result = self._verify_audio_impl(
+                                validator_audio_path, miner_audio_path
+                            )
+                            result_container["result"] = result
+                            result_container["error"] = None
+
+                        else:
+                            bt.logging.error(
+                                f"Unknown verification task type: {task_type}"
+                            )
+                            result_container = args[-1] if args else None
+                            if result_container:
+                                result_container["result"] = (
+                                    0.0,
+                                    {"error": f"Unknown task type: {task_type}"},
+                                )
+                                result_container["error"] = Exception(
+                                    f"Unknown task type: {task_type}"
+                                )
+
+                    except Exception as e:
+                        bt.logging.error(f"Error in {task_type} verification: {str(e)}")
+                        bt.logging.error(traceback.format_exc())
+                        result_container = args[-1] if args else None
+                        if result_container:
+                            result_container["result"] = (0.0, {"error": str(e)})
+                            result_container["error"] = e
+                    finally:
+                        # Mark task as completed
+                        result_container = args[-1] if args else None
+                        if result_container:
+                            result_container["completed"] = True
+                        VideoVerifier._verification_queue.task_done()
 
             except Exception as e:
                 bt.logging.error(f"Error in verification queue processor: {str(e)}")
                 bt.logging.error(traceback.format_exc())
                 time.sleep(1)  # Avoid error loop too fast
 
-        bt.logging.info("Video verification queue processor stopped")
+        bt.logging.info("Verification queue processor stopped")
 
     @classmethod
     def _get_model(cls):
@@ -101,11 +173,15 @@ class VideoVerifier:
             cls._model_instance.to(cls._device)
         return cls._model_instance, cls._device
 
-    async def verify_task(
-        self, task_id, complete_workflow, completion_time=None, worker_id=None
+    async def verify_task_with_package(
+        self,
+        task_id,
+        complete_workflow,
+        completion_time=None,
+        worker_id=None,
     ):
         """
-        Complete verification flow: execute ComfyUI workflow, download miner video, compare similarity
+        Complete verification flow with package support: execute ComfyUI workflow, download miner package, compare similarity
 
         Args:
             task_id: Task ID
@@ -117,98 +193,492 @@ class VideoVerifier:
             tuple: (score, verification result dictionary)
         """
         try:
-            bt.logging.info(f"Starting verification for task {task_id}")
+            bt.logging.info(f"Starting package verification for task {task_id}")
 
-            # 1. Execute ComfyUI workflow to generate verification video
-            bt.logging.info(f"Using ComfyUI to generate verification video: {task_id}")
-            # Check if this is a complete workflow configuration
-            is_complete_workflow = False
-            if isinstance(complete_workflow, dict):
-                # Check if it contains nodes with class_type attribute
-                for node_id, node in complete_workflow.items():
-                    if isinstance(node, dict) and "class_type" in node:
-                        is_complete_workflow = True
-                        break
+            # 1. Execute ComfyUI workflow to generate verification package
+            bt.logging.info(
+                f"Using ComfyUI to generate verification package: {task_id}"
+            )
 
-            if is_complete_workflow:
-                bt.logging.info(
-                    f"Using complete workflow configuration for verification: {task_id}"
-                )
-            else:
-                bt.logging.info(
-                    f"Using original workflow parameters for verification: {task_id}"
-                )
-
-            # Execute workflow to get filename and validator execution time
-            output_filename, validator_execution_time, server_info = (
+            # Execute workflow to get output info and validator execution time
+            output_info, validator_execution_time, server_info = (
                 self.run_comfy_workflow(complete_workflow, task_id, worker_id)
             )
 
-            if not output_filename:
+            if not output_info:
                 bt.logging.error(f"Validator failed to generate video: {task_id}")
+                # clear comfy queue
                 return 0.0, {"error": "Failed to generate verification video"}
 
-            # Convert filename to complete URL path
-            # Get ComfyAPI server
+            # 3. Get validator package (from ComfyUI output)
             if not server_info:
                 bt.logging.error("Unable to get ComfyUI server information")
                 return 0.0, {"error": "Failed to get ComfyUI server info"}
 
-            # Build complete URL
-            host = server_info["host"]
-            port = server_info["port"]
-            validator_output_url = (
-                f"http://{host}:{port}/view?filename={output_filename}&type=output"
+            out_dir = self.validator.video_manager.get_video_cache_paths(
+                task_id, "validator", False
             )
 
-            # Download validator-generated video using video manager
-            download_success, validator_video_path = (
-                await self.validator.video_manager.download_video(
-                    task_id, validator_output_url, "validator"
-                )
+            downloaded_files = batch_download_outputs(
+                output_info,
+                f"http://{server_info["host"]}:{server_info["port"]}",
+                out_dir,
             )
 
-            if not download_success:
+            if not downloaded_files:
                 bt.logging.error(
-                    f"Unable to download validator-generated video: {validator_output_url}"
+                    f"Failed to download/extract validator package: {task_id}"
                 )
-                return 0.0, {"error": "Failed to download validator video"}
+                return 0.0, {"error": "Failed to process validator package"}
 
-            # 2. Get miner video path from video manager
-            miner_video_path = self.validator.video_manager.get_video_cache_paths(
-                task_id, "miner", True
+            # 4. Pre-verify outputs structure compatibility
+            bt.logging.info(f"Pre-verifying outputs structure: {task_id}")
+            is_compatible, validator_file_mapping, miner_file_mapping, error_msg = (
+                self.pre_verify_outputs(task_id)
             )
 
-            # Check if miner video exists
-            if (
-                not os.path.exists(miner_video_path)
-                or os.path.getsize(miner_video_path) == 0
-            ):
-                bt.logging.error(f"Miner video not found or empty: {miner_video_path}")
-                return 0.0, {"error": "Failed to get miner video"}
+            if not is_compatible:
+                bt.logging.error(f"outputs structure incompatible: {error_msg}")
+                return 0.0, {"error": f"outputs structure incompatible: {error_msg}"}
 
-            # 3. Verify video similarity
-            bt.logging.info(f"Comparing video similarity: {task_id}")
-            score, metrics = self.verify_videos(
-                validator_video_path,
-                miner_video_path,
+            # 5. Compare packages using pre-verified file mappings
+            bt.logging.info(f"Comparing outputs contents: {task_id}")
+            score, metrics = self.verify_packages(
+                validator_file_mapping,
+                miner_file_mapping,
                 validator_execution_time,
                 completion_time,
             )
 
             # Build result
-            result = {
-                **metrics,
-            }
+            result = {**metrics}
 
             bt.logging.info(
-                f"Task {task_id} verification completed, similarity: {score:.4f}"
+                f"Task {task_id} package verification completed, similarity: {score:.4f}"
             )
             return score, result
 
         except Exception as e:
-            bt.logging.error(f"Verification task failed: {str(e)}")
+            bt.logging.error(f"Package verification task failed: {str(e)}")
             bt.logging.error(traceback.format_exc())
+            return 0.0, {"error": str(e)}
+
+    def pre_verify_outputs(self, task_id):
+        """
+        Pre-verify outputs by comparing node structure and file formats between validator and miner
+
+        Args:
+            task_id: Task ID for cache path generation
+
+        Returns:
+            tuple: (is_compatible, miner_file_mapping, validator_file_mapping, error_message)
+                   - is_compatible: Boolean indicating if structures are compatible
+                   - validator_file_mapping: Dict mapping node_id -> {output_type -> [file_paths]}
+                   - miner_file_mapping: Dict mapping node_id -> {output_type -> [file_paths]}
+                   - error_message: Description of incompatibility if any
+        """
+        try:
+            bt.logging.info(f"Pre-verifying outputs for task {task_id}")
+
+            # Get cache paths for both miner and validator packages
+            miner_extracted_dir = self.validator.video_manager.get_video_cache_paths(
+                task_id, "miner", True
+            )
+
+            validator_extracted_dir = (
+                self.validator.video_manager.get_video_cache_paths(
+                    task_id, "validator", True
+                )
+            )
+
+            bt.logging.info(f"miner_extracted_dir: {miner_extracted_dir}")
+            bt.logging.info(f"validator_extracted_dir: {validator_extracted_dir}")
+
+            # Load outputs.json content
+            miner_outputs_info = self.validator.video_manager.load_outputs_json(
+                miner_extracted_dir
+            )
+            validator_outputs_info = self.validator.video_manager.load_outputs_json(
+                validator_extracted_dir
+            )
+
+            if miner_outputs_info is None:
+                return (
+                    False,
+                    validator_outputs_info,
+                    miner_outputs_info,
+                    "Failed to load miner outputs.json",
+                )
+
+            if validator_outputs_info is None:
+                return (
+                    False,
+                    validator_outputs_info,
+                    miner_outputs_info,
+                    "Failed to load validator outputs.json",
+                )
+
+            # Generate file mappings for comparison
+            miner_file_mapping = self.validator.video_manager.get_files_from_outputs(
+                miner_outputs_info, miner_extracted_dir
+            )
+            validator_file_mapping = (
+                self.validator.video_manager.get_files_from_outputs(
+                    validator_outputs_info, validator_extracted_dir
+                )
+            )
+
+            # compare validator and miner file mapping
+            # Check if miner has all validator file keys and same file counts
+            validator_keys = set(validator_file_mapping.keys())
+            miner_keys = set(miner_file_mapping.keys())
+
+            # Check if miner has all validator nodes
+            missing_in_miner = validator_keys - miner_keys
+            if missing_in_miner:
+                error_msg = f"File mapping mismatch: miner missing validator keys {missing_in_miner}"
+                return False, validator_file_mapping, miner_file_mapping, error_msg
+
+            # Check file counts for each validator key
+            for key in validator_keys:
+                validator_files = validator_file_mapping[key]
+                miner_files = miner_file_mapping[key]
+
+                if len(validator_files) != len(miner_files):
+                    error_msg = f"File count mismatch for key {key}: "
+                    error_msg += f"validator has {len(validator_files)} files, miner has {len(miner_files)} files"
+                    return False, validator_file_mapping, miner_file_mapping, error_msg
+
+            bt.logging.info(f"keys: {list(validator_keys)} vs {list(miner_keys)}")
+
+            return True, validator_file_mapping, miner_file_mapping, ""
+
+        except Exception as e:
+            error_msg = f"Error in pre-verification: {str(e)}"
+            bt.logging.error(error_msg)
+            bt.logging.error(traceback.format_exc())
+            return False, None, None, error_msg
+
+    def verify_packages(
+        self,
+        validator_file_mapping,
+        miner_file_mapping,
+        validator_execution_time=None,
+        completion_time=None,
+    ):
+        """
+        Verify similarity between validator and miner packages using pre-verified file mappings
+
+        Args:
+            validator_file_mapping: Pre-verified validator file mapping from pre_verify_outputs
+            miner_file_mapping: Pre-verified miner file mapping from pre_verify_outputs
+            validator_execution_time: Validator execution time
+            completion_time: Task completion time
+
+        Returns:
+            tuple: (score, metrics dictionary)
+        """
+        try:
+            bt.logging.info("Comparing package contents using pre-verified mappings")
+
+            # Initialize scoring variables
+            total_quality_score = 0.0
+            total_files = 0
+            file_scores = {}
+
+            # Calculate overall speed score once (not per file)
+            overall_speed_score = self._calculate_speed_score(
+                validator_execution_time, completion_time
+            )
+
+            # Compare each key (node_id_output_type)
+            for key in set(
+                list(validator_file_mapping.keys()) + list(miner_file_mapping.keys())
+            ):
+                validator_files = validator_file_mapping.get(key, [])
+                miner_files = miner_file_mapping.get(key, [])
+
+                # Compare files of this key (should have same count due to pre-verification)
+                for i, (validator_file_info, miner_file_info) in enumerate(
+                    zip(validator_files, miner_files)
+                ):
+                    validator_file_path = validator_file_info.get("file_path")
+                    miner_file_path = miner_file_info.get("file_path")
+                    file_type = validator_file_info.get("file_type", "unknown")
+                    file_type_og = validator_file_info.get("file_type_og", "unknown")
+                    base_name = validator_file_info.get("base_name", "unknown")
+
+                    if os.path.exists(validator_file_path) and os.path.exists(
+                        miner_file_path
+                    ):
+                        # Calculate quality score based on file type
+                        quality_score, metrics = self._calculate_quality_score(
+                            validator_file_path,
+                            miner_file_path,
+                            file_type_og,
+                            validator_execution_time,
+                            completion_time,
+                        )
+
+                        file_key = f"{key}_{i}"
+                        file_scores[file_key] = {
+                            "quality_score": quality_score,
+                            "file_type": file_type,
+                            "file_name": base_name,
+                            "metrics": metrics,
+                        }
+
+                        total_quality_score += quality_score
+                        total_files += 1
+                    else:
+                        bt.logging.warning(
+                            f"File not found: validator={validator_file_path}, miner={miner_file_path}"
+                        )
+
+            # Calculate final scores
+            avg_quality_score = (
+                total_quality_score / total_files if total_files > 0 else 0.0
+            )
+
+            # Final score: quality * 0.6 + speed * 0.4
+            final_score = avg_quality_score * 0.6 + overall_speed_score * 0.4
+
+            # Build metrics
+            metrics = {
+                "final_score": final_score,
+                "quality_score": avg_quality_score,
+                "speed_score": overall_speed_score,
+                "total_files_compared": total_files,
+                "file_scores": file_scores,
+                "validator_execution_time": validator_execution_time,
+                "completion_time": completion_time,
+            }
+
+            bt.logging.info(
+                f"Package verification completed, final score: {final_score:.4f}"
+            )
+            bt.logging.info(
+                f"Quality score: {avg_quality_score:.4f}, Speed score: {overall_speed_score:.4f}"
+            )
+            return final_score, metrics
+
+        except Exception as e:
+            bt.logging.error(f"Error verifying packages: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return 0.0, {"error": str(e)}
+
+    def _calculate_quality_score(
+        self,
+        validator_file_path,
+        miner_file_path,
+        file_type,
+        validator_execution_time=None,
+        completion_time=None,
+    ):
+        """
+        Calculate quality score based on file type
+
+        Args:
+            validator_file_path: Path to validator file
+            miner_file_path: Path to miner file
+            file_type: Type of file (video, image, audio, etc.)
+            validator_execution_time: Validator execution time
+            completion_time: Task completion time
+
+        Returns:
+            tuple: (quality_score, metrics dictionary)
+        """
+        try:
+            if file_type == "video":
+                # Get video verification result
+                video_score, metrics = self.verify_videos(
+                    validator_file_path,
+                    miner_file_path,
+                    validator_execution_time,
+                    completion_time,
+                )
+
+                quality_score = video_score
+                bt.logging.info(
+                    f"Video quality score: {quality_score:.4f} video_metrics: {metrics}"
+                )
+
+            elif file_type == "image":
+                # Image quality score: direct image similarity
+                quality_score, metrics = self.verify_images(
+                    validator_file_path,
+                    miner_file_path,
+                    validator_execution_time,
+                    completion_time,
+                )
+                bt.logging.info(
+                    f"Image quality score: {quality_score:.4f} image_metrics: {metrics}"
+                )
+
+            elif file_type == "audio":
+                # Audio quality score: direct audio similarity
+                quality_score, metrics = self.verify_audio(
+                    validator_file_path,
+                    miner_file_path,
+                    validator_execution_time,
+                    completion_time,
+                )
+                bt.logging.info(
+                    f"Audio quality score: {quality_score:.4f} audio_metrics: {metrics}"
+                )
+
+            else:
+                # Other file types get fixed score of 0.5
+                bt.logging.info(f"Using fixed score 0.5 for file type: {file_type}")
+                quality_score = 0.5
+                metrics = {}
+
+            return quality_score, metrics
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error calculating quality score for {file_type}: {str(e)}"
+            )
+            return 0.0, {}
+
+    def _calculate_speed_score(self, validator_execution_time, completion_time):
+        """
+        Calculate speed score based on execution times
+
+        Args:
+            validator_execution_time: Validator execution time
+            completion_time: Task completion time
+
+        Returns:
+            float: Speed score between 0 and 1
+        """
+        try:
+            if not validator_execution_time or not completion_time:
+                return 0.5  # Default score if times not available
+
+            # Normalize speed score (faster is better)
+            # Assuming completion_time includes both validator and miner time
+            # We want to reward faster completion relative to validator time
+            speed_ratio = validator_execution_time / completion_time
+
+            # Clamp to reasonable range and normalize
+            speed_ratio = max(0.1, min(2.0, speed_ratio))
+            speed_score = speed_ratio / 2.0  # Normalize to 0-1 range
+
+            return speed_score
+
+        except Exception as e:
+            bt.logging.error(f"Error calculating speed score: {str(e)}")
+            return 0.5
+
+    def verify_images(
+        self,
+        validator_image_path,
+        miner_image_path,
+        validator_execution_time=None,
+        completion_time=None,
+    ):
+        """
+        Verify image similarity using ImageBind
+
+        Args:
+            validator_image_path: Path to validator image
+            miner_image_path: Path to miner image
+            validator_execution_time: Validator execution time
+            completion_time: Task completion time
+
+        Returns:
+            tuple: (similarity score, metrics dictionary)
+        """
+        try:
+            # Create result container
+            result_container = {"completed": False, "result": None, "error": None}
+
+            # Add task to queue
+            bt.logging.info("Adding image verification task to queue")
+            args = (
+                validator_image_path,
+                miner_image_path,
+                validator_execution_time,
+                completion_time,
+                result_container,
+            )
+            self._verification_queue.put(("image", args))
+
+            # Wait for result
+            max_wait_time = 300  # 5 minutes
+            start_time = time.time()
+            while not result_container["completed"]:
+                if time.time() - start_time > max_wait_time:
+                    bt.logging.error("Image verification timeout")
+                    return 0.0, {"error": "Image verification timeout"}
+                time.sleep(0.1)
+
+            if result_container["error"]:
+                bt.logging.error(
+                    f"Image verification error: {result_container['error']}"
+                )
+                return 0.0, {"error": result_container["error"]}
+
+            return result_container["result"]
+
+        except Exception as e:
+            bt.logging.error(f"Error in image verification: {str(e)}")
+            return 0.0, {"error": str(e)}
+
+    def verify_audio(
+        self,
+        validator_audio_path,
+        miner_audio_path,
+        validator_execution_time=None,
+        completion_time=None,
+    ):
+        """
+        Verify audio similarity using ImageBind
+
+        Args:
+            validator_audio_path: Path to validator audio
+            miner_audio_path: Path to miner audio
+            validator_execution_time: Validator execution time
+            completion_time: Task completion time
+
+        Returns:
+            tuple: (similarity score, metrics dictionary)
+        """
+        try:
+            # Create result container
+            result_container = {"completed": False, "result": None, "error": None}
+
+            # Add task to queue
+            bt.logging.info("Adding audio verification task to queue")
+            args = (
+                validator_audio_path,
+                miner_audio_path,
+                validator_execution_time,
+                completion_time,
+                result_container,
+            )
+            self._verification_queue.put(("audio", args))
+
+            # Wait for result
+            max_wait_time = 300  # 5 minutes
+            start_time = time.time()
+            while not result_container["completed"]:
+                if time.time() - start_time > max_wait_time:
+                    bt.logging.error("Audio verification timeout")
+                    return 0.0, {"error": "Audio verification timeout"}
+                time.sleep(0.1)
+
+            if result_container["error"]:
+                bt.logging.error(
+                    f"Audio verification error: {result_container['error']}"
+                )
+                return 0.0, {"error": result_container["error"]}
+
+            return result_container["result"]
+
+        except Exception as e:
+            bt.logging.error(f"Error in audio verification: {str(e)}")
             return 0.0, {"error": str(e)}
 
     def run_comfy_workflow(self, complete_workflow, task_id=None, worker_id=None):
@@ -223,112 +693,58 @@ class VideoVerifier:
                   execution_time is in seconds, and server_info contains host and port information
         """
         try:
-            bt.logging.info("Executing ComfyUI workflow")
-
-            # Check if this is a complete workflow configuration
-            has_class_type = False
-            if isinstance(complete_workflow, dict):
-                for node_id, node in complete_workflow.items():
-                    if isinstance(node, dict) and "class_type" in node:
-                        has_class_type = True
-                        break
-
-                if has_class_type:
-                    bt.logging.info(
-                        "Complete workflow configuration detected, using directly"
-                    )
-                else:
-                    bt.logging.warning(
-                        "Workflow might be incomplete - missing class_type attributes"
-                    )
-
-            # Log workflow complexity
-            if isinstance(complete_workflow, dict):
-                bt.logging.info(f"Workflow contains {len(complete_workflow)} nodes")
-
-            # Execute workflow with timeout handling
-            start_time = time.time()
-            bt.logging.info(
-                f"Starting ComfyUI workflow execution at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            # Use ComfyWSAPI to execute workflow on specific server
+            success, task_id, server_info = self.comfy_api.execute_workflow_on_server(
+                complete_workflow, task_id, worker_id
             )
 
-            # Use ComfyAPI class to execute workflow
-            success, output_filename, server_info, comfy_execution_time = (
-                self.comfy_api.execute_comfy_workflow(
-                    complete_workflow, task_id, worker_id
+            if not success:
+                bt.logging.error(f"Failed to submit workflow to worker {worker_id}")
+                return None, 0, server_info
+
+            # Poll for task completion
+            max_poll_time = 3600  # 1 hour max
+            poll_interval = 2  # 2 seconds
+            start_poll_time = time.time()
+            output_info = None
+
+            while time.time() - start_poll_time < max_poll_time:
+                task_status = self.comfy_api.get_task_status(task_id, server_info["id"])
+
+                if not task_status:
+                    time.sleep(poll_interval)
+                    continue
+
+                if task_status.get("status") == "completed":
+                    # Get output info from task
+                    output_info = task_status.get("output_info")
+                    break
+
+                elif task_status.get("status") == "failed":
+                    bt.logging.error(f"Task {task_id} failed on worker {worker_id}")
+                    break
+
+                time.sleep(poll_interval)
+            else:
+                bt.logging.error(
+                    f"Task {task_id} polling timeout on worker {worker_id}"
                 )
-            )
+                self.comfy_api.stop_task(task_id, server_info)
 
-            execution_time = (
-                comfy_execution_time
-                if comfy_execution_time
-                else (time.time() - start_time)
-            )
+            execution_time = task_status.get("execution_time", 0)
+            self.comfy_api.remove_task(task_id, server_info["id"])
+
+            if not output_info:
+                bt.logging.error(
+                    f"Task {task_id} polling timeout on worker {worker_id}"
+                )
+                return None, execution_time, server_info
+
             bt.logging.info(
                 f"ComfyUI workflow execution completed in {execution_time:.2f} seconds"
             )
 
-            if not success or not output_filename:
-                bt.logging.error("ComfyUI workflow execution failed")
-
-                # Log more detailed error information
-                if isinstance(complete_workflow, dict):
-                    bt.logging.error(f"Workflow node count: {len(complete_workflow)}")
-
-                    # Check for common workflow issues
-                    missing_class_types = []
-                    for node_id, node in complete_workflow.items():
-                        if isinstance(node, dict):
-                            if "class_type" not in node:
-                                missing_class_types.append(node_id)
-                            elif "inputs" in node and not node.get("inputs"):
-                                bt.logging.error(
-                                    f"Node {node_id} ({node.get('class_type')}) has empty inputs"
-                                )
-
-                    if missing_class_types:
-                        bt.logging.error(
-                            f"Nodes missing class_type attribute: {missing_class_types}"
-                        )
-
-                # Check server status
-                if server_info:
-                    bt.logging.error(
-                        f"Used ComfyUI server: {server_info.get('host')}:{server_info.get('port')}"
-                    )
-
-                return None, execution_time, None
-
-            bt.logging.info(
-                f"ComfyUI workflow executed successfully, output: {output_filename}"
-            )
-
-            # Verify output file exists and is accessible
-            if server_info and "host" in server_info and "port" in server_info:
-                host = server_info["host"]
-                port = server_info["port"]
-                comfy_url = f"http://{host}:{port}"
-
-                filename = os.path.basename(output_filename)
-                video_url = f"{comfy_url}/view?filename={filename}&type=output"
-
-                # bt.logging.info(f"Verifying output file accessibility: {video_url}")
-
-                # Check if file is accessible
-                try:
-                    response = requests.head(video_url, timeout=10)
-                    if response.status_code == 200:
-                        bt.logging.info("Output file is accessible")
-                    else:
-                        bt.logging.warning(
-                            f"Output file might not be accessible: status code {response.status_code}"
-                        )
-                except Exception as e:
-                    bt.logging.warning(
-                        f"Could not verify output file accessibility: {str(e)}"
-                    )
-
-            return output_filename, execution_time, server_info
+            return output_info, execution_time, server_info
 
         except Exception as e:
             bt.logging.error(f"Error executing ComfyUI workflow: {str(e)}")
@@ -364,8 +780,9 @@ class VideoVerifier:
             miner_video_path,
             validator_execution_time,
             completion_time,
+            result_container,
         )
-        VideoVerifier._verification_queue.put((args, {}, result_container))
+        VideoVerifier._verification_queue.put(("video", args))
 
         # Wait for task to complete
         start_time = time.time()
@@ -392,8 +809,6 @@ class VideoVerifier:
         self,
         validator_video_path,
         miner_video_path,
-        validator_execution_time=None,
-        completion_time=None,
     ):
         """
             Internal method to actually execute video verification, called by queue processor
@@ -401,8 +816,6 @@ class VideoVerifier:
         Args:
             validator_video_path: Path to validator video
             miner_video_path: Path to miner video
-            validator_execution_time: Validator's execution time in seconds
-            completion_time: Task completion time in seconds
 
         Returns:
             tuple: (similarity score, metrics dictionary)
@@ -476,32 +889,8 @@ class VideoVerifier:
             }
 
             # Set weights for score calculation
-            video_score_weight = 0.4
+            video_score_weight = 0.8
             audio_score_weight = 0.2
-            runtime_weight = 0.4
-
-            # Process completion time if provided
-            runtime_score = 0
-            if completion_time is not None:
-                # Use validator's execution time as base runtime if available, otherwise use default
-                # Ensure base_runtime is at least 10 second to avoid division by zero issues
-                base_runtime = (
-                    validator_execution_time
-                    if validator_execution_time is not None
-                    else 10
-                )
-                base_runtime = max(10, base_runtime)
-
-                metrics["validator_execution_time"] = base_runtime
-
-                # Calculate runtime score component
-                runtime_upper_limit = min(base_runtime * 2, completion_time)
-                diff_runtime = base_runtime - runtime_upper_limit
-                runtime_scale = max(-1, min(1, diff_runtime / 100))
-                runtime_score = runtime_scale
-
-                metrics["completion_time"] = completion_time
-                metrics["runtime_score"] = runtime_scale
 
             if video_cos_sim < 0.95 or audio_cos_sim < 0.95:
                 bt.logging.warning(
@@ -509,15 +898,12 @@ class VideoVerifier:
                 )
                 metrics["video_component_score"] = video_score_weight * video_cos_sim
                 metrics["audio_component_score"] = audio_score_weight * audio_cos_sim
-                metrics["runtime_component_score"] = runtime_weight * runtime_score
                 metrics["final_score"] = 0
                 return 0.0, metrics
 
             # Calculate combined score
             score = (
-                video_score_weight * video_cos_sim
-                + audio_score_weight * audio_cos_sim
-                + runtime_weight * runtime_score
+                video_score_weight * video_cos_sim + audio_score_weight * audio_cos_sim
             )
 
             # Normalize score to [0, 1] range
@@ -526,12 +912,10 @@ class VideoVerifier:
             # Add component scores to metrics
             metrics["video_component_score"] = video_score_weight * video_cos_sim
             metrics["audio_component_score"] = audio_score_weight * audio_cos_sim
-            metrics["runtime_component_score"] = runtime_weight * runtime_score
             metrics["final_score"] = score
 
             bt.logging.info(
-                f"Similarity metrics: video={video_cos_sim:.4f}, audio={audio_cos_sim:.4f}, "
-                f"runtime={runtime_score:.4f}, final_score={score:.4f}"
+                f"Similarity metrics: video={video_cos_sim:.4f}, audio={audio_cos_sim:.4f}, final_score={score:.4f}"
             )
             return score, metrics
 
@@ -540,63 +924,119 @@ class VideoVerifier:
             bt.logging.error(traceback.format_exc())
             return 0.0, {"error": str(e)}
 
-    def verify_text_video(self, text, video_path):
+    def _verify_images_impl(
+        self,
+        validator_image_path,
+        miner_image_path,
+    ):
         """
-        Verify similarity between text and video using ImageBind model
+        Implementation of image similarity verification using ImageBind
 
         Args:
-            text: Text prompt
-            video_path: Path to video
+            validator_image_path: Path to validator image
+            miner_image_path: Path to miner image
 
         Returns:
             tuple: (similarity score, metrics dictionary)
         """
         try:
-            bt.logging.info(f"Calculating text-video similarity for: {text}")
+            bt.logging.info(
+                f"Comparing images: {validator_image_path} vs {miner_image_path}"
+            )
 
-            # Load inputs
+            # Use inputs dictionary approach for consistency
             inputs = {
-                ModalityType.TEXT: data.load_and_transform_text([text], self.device),
-                ModalityType.VISION: data.load_and_transform_video_data(
-                    [video_path], self.device
+                ModalityType.VISION: data.load_and_transform_vision_data(
+                    [validator_image_path, miner_image_path],
+                    self.device,
                 ),
             }
 
             with torch.no_grad():
                 embeddings = self.model(inputs)
 
-            # Get embeddings
-            text_embedding = embeddings[ModalityType.TEXT]
-            video_embedding = embeddings[ModalityType.VISION]
+            # Get image embeddings
+            validator_image_embedding = embeddings[ModalityType.VISION][0:1]
+            miner_image_embedding = embeddings[ModalityType.VISION][1:2]
 
             # Calculate cosine similarity
-            text_embedding_norm = F.normalize(text_embedding, p=2, dim=1)
-            video_embedding_norm = F.normalize(video_embedding, p=2, dim=1)
-            cosine_similarity = torch.sum(
-                text_embedding_norm * video_embedding_norm, dim=1
+            similarity = F.cosine_similarity(
+                validator_image_embedding, miner_image_embedding, dim=1
+            )
+            similarity_score = similarity.item()
+            image_l2_distance = torch.norm(
+                validator_image_embedding - miner_image_embedding, p=2, dim=1
             ).item()
 
-            # Calculate L2 distance
-            l2_distance = torch.norm(
-                text_embedding - video_embedding, p=2, dim=1
-            ).item()
-
-            # Calculate metrics
             metrics = {
-                "text_video_cosine_similarity": cosine_similarity,
-                "text_video_l2_distance": l2_distance,
+                "image_cosine_similarity": similarity_score,
+                "image_l2_distance": image_l2_distance,
+                "final_score": similarity_score,
             }
 
-            # Normalize score to [0, 1] range
-            score = max(0, min(1, cosine_similarity))
-
-            bt.logging.info(
-                f"Text-video similarity metrics: cosine={cosine_similarity:.4f}, l2={l2_distance:.4f}, score={score:.4f}"
-            )
-            return score, metrics
+            bt.logging.info(f"Image similarity score: {similarity_score:.4f}")
+            return similarity_score, metrics
 
         except Exception as e:
-            bt.logging.error(f"Error verifying text-video similarity: {str(e)}")
+            bt.logging.error(f"Error in image verification implementation: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return 0.0, {"error": str(e)}
+
+    def _verify_audio_impl(
+        self,
+        validator_audio_path,
+        miner_audio_path,
+    ):
+        """
+        Implementation of audio similarity verification using ImageBind
+
+        Args:
+            validator_audio_path: Path to validator audio
+            miner_audio_path: Path to miner audio
+
+        Returns:
+            tuple: (similarity score, metrics dictionary)
+        """
+        try:
+            bt.logging.info(
+                f"Comparing audio: {validator_audio_path} vs {miner_audio_path}"
+            )
+
+            # Use inputs dictionary approach for consistency
+            inputs = {
+                ModalityType.AUDIO: data.load_and_transform_audio_data(
+                    [validator_audio_path, miner_audio_path],
+                    self.device,
+                ),
+            }
+
+            with torch.no_grad():
+                embeddings = self.model(inputs)
+
+            # Get audio embeddings
+            validator_audio_embedding = embeddings[ModalityType.AUDIO][0:1]
+            miner_audio_embedding = embeddings[ModalityType.AUDIO][1:2]
+
+            # Calculate cosine similarity
+            similarity = F.cosine_similarity(
+                validator_audio_embedding, miner_audio_embedding, dim=1
+            )
+            similarity_score = similarity.item()
+            audio_l2_distance = torch.norm(
+                validator_audio_embedding - miner_audio_embedding, p=2, dim=1
+            ).item()
+
+            metrics = {
+                "audio_cosine_similarity": similarity_score,
+                "audio_l2_distance": audio_l2_distance,
+                "final_score": similarity_score,
+            }
+
+            bt.logging.info(f"Audio similarity score: {similarity_score:.4f}")
+            return similarity_score, metrics
+
+        except Exception as e:
+            bt.logging.error(f"Error in audio verification implementation: {str(e)}")
             bt.logging.error(traceback.format_exc())
             return 0.0, {"error": str(e)}
 
@@ -609,3 +1049,11 @@ class VideoVerifier:
         ):
             VideoVerifier._stop_thread = True
             # Don't wait for thread to finish, let it finish naturally
+
+        # Clean up ComfyWSAPI instance
+        try:
+            if hasattr(self, "comfy_api"):
+                self.comfy_api.shutdown()
+                bt.logging.info("Shutdown ComfyWSAPI instance")
+        except Exception as e:
+            bt.logging.error(f"Error cleaning up ComfyWSAPI instance: {str(e)}")

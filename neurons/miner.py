@@ -9,13 +9,17 @@ import shutil
 
 from neza.protocol import VideoTask, TaskStatusCheck
 
-# Import ComfyUI API module
-from neza.api.comfy_api import ComfyAPI
+# Import ComfyUI WebSocket API module
+from neza.api.comfy_ws_api import ComfyWSAPI
 
 # import base miner class which takes care of most of the boilerplate
 from neza.base.miner import BaseMinerNeuron
 
-from neza.utils.http import http_get_request_sync, http_put_request_sync
+from neza.utils.http import (
+    http_get_request_sync,
+    http_put_request_sync,
+    batch_download_and_package_outputs,
+)
 from neza.utils.tools import _parse_env_servers
 
 import traceback
@@ -34,9 +38,9 @@ class VideoMiner(BaseMinerNeuron):
 
     def __init__(self, config=None):
         super(VideoMiner, self).__init__(config=config)
-        # Initialize ComfyUI instance
+        # Initialize ComfyUI WebSocket API instance
         servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
-        self.comfy_api = ComfyAPI(servers, clear_queue=False)
+        self.comfy_api = ComfyWSAPI(servers, clear_queue=False)
 
         # Task queue and status management
         self.task_queue = PriorityQueue()  # Priority queue
@@ -212,7 +216,7 @@ class VideoMiner(BaseMinerNeuron):
         return priority
 
     def _process_tasks(self):
-        """Task processing thread"""
+        """Task processing thread - polls for task status"""
         while not self.should_exit:
             try:
                 # Check if there are tasks in the queue
@@ -236,7 +240,7 @@ class VideoMiner(BaseMinerNeuron):
 
                 bt.logging.info(f"Processing task {task_id}")
 
-                # Call workflow parameters
+                # Submit task to ComfyUI and start polling
                 success = self._run_comfy_workflow(task_id, workflow_params)
 
                 if not success:
@@ -268,168 +272,37 @@ class VideoMiner(BaseMinerNeuron):
                 time.sleep(1)
 
     def _run_comfy_workflow(self, task_id, workflow_params):
-        """Run comfy workflow
-
-        Args:
-            task_id: Task ID
-            workflow_params: Complete workflow configuration
-
-        Returns:
-            bool: Whether successful
-        """
+        """Run comfy workflow and batch process all outputs"""
         try:
             bt.logging.info(f"Running comfy workflow for task {task_id}")
-
-            # Update task status to processing
-            with self.task_lock:
-                if task_id in self.tasks:
-                    self.tasks[task_id]["status"] = "processing"
-                    self.tasks[task_id]["updated_at"] = time.time()
-
-            bt.logging.info(f"Executing ComfyUI workflow for task {task_id}")
-
-            # Get task details including upload URL and content type
             with self.task_lock:
                 if task_id not in self.tasks:
                     bt.logging.error(f"Task {task_id} not found in memory")
                     return False
-
                 task_info = self.tasks[task_id]
-
-            # Check if there's a custom upload URL
             has_custom_upload = task_info.get("has_custom_upload", False)
             upload_url = task_info.get("upload_url", "")
-
-            # Execute ComfyUI workflow
-            success, output_file, server_info, _ = self.comfy_api.execute_workflow(
+            # submit task to comfyui
+            success, task_id, server_info = self.comfy_api.execute_workflow(
                 workflow_params, task_id
             )
-
             if not success:
-                bt.logging.error(
-                    f"ComfyUI workflow execution failed for task {task_id}"
-                )
-                with self.task_lock:
-                    if task_id in self.tasks:
-                        self.tasks[task_id]["status"] = "failed"
-                        self.tasks[task_id][
-                            "error_message"
-                        ] = "ComfyUI workflow execution failed"
-                        self.tasks[task_id]["updated_at"] = time.time()
+                bt.logging.error(f"Failed to submit task to ComfyUI: {task_id}")
                 return False
 
-            bt.logging.info(
-                f"ComfyUI workflow executed successfully for task {task_id}, output file: {output_file}"
+            # Poll for task completion
+            success = self._poll_task_completion(
+                task_id, upload_url if has_custom_upload else None, server_info
             )
+            if not success:
+                bt.logging.error(f"Failed to poll for task completion: {task_id}")
+                return False
 
-            # If there's a custom upload URL, upload video to specified URL
-            if has_custom_upload and upload_url:
-                bt.logging.info(f"Uploading video to custom URL for task {task_id}...")
-
-                # Maximum retry count
-                max_retries = 3
-                retry_count = 0
-                upload_success = False
-
-                while retry_count < max_retries and not upload_success:
-                    try:
-                        # Get correct ComfyUI server address from server_info
-                        if (
-                            server_info
-                            and "host" in server_info
-                            and "port" in server_info
-                        ):
-                            host = server_info["host"]
-                            port = server_info["port"]
-                            comfy_url = f"http://{host}:{port}"
-                        else:
-                            # If no server info is obtained, use environment variable or default value
-                            comfy_url = os.environ.get(
-                                "COMFYUI_HOST", "http://127.0.0.1:8188"
-                            )
-
-                        filename = os.path.basename(output_file)
-                        video_download_url = (
-                            f"{comfy_url}/view?filename={filename}&type=output"
-                        )
-
-                        bt.logging.info(f"Downloading video from ComfyUI")
-
-                        # Increase timeout setting when downloading videos
-                        video_data, status_code = http_get_request_sync(
-                            video_download_url, timeout=120
-                        )
-
-                        if status_code != 200 or video_data is None:
-                            bt.logging.error(
-                                f"Failed to download video from ComfyUI: {status_code}"
-                            )
-                            retry_count += 1
-                            time.sleep(2)
-                            continue
-
-                        # Check the size of the downloaded data.
-                        data_size = len(video_data) if video_data else 0
-                        bt.logging.info(f"Downloaded video size: {data_size} bytes")
-
-                        if data_size == 0:
-                            bt.logging.error("Downloaded video data is empty")
-                            retry_count += 1
-                            time.sleep(2)
-                            continue
-
-                        # Add timeout settings and retries when uploading videos.
-                        bt.logging.info(
-                            f"Uploading video to URL, size: {data_size} bytes"
-                        )
-                        response_text, status_code = http_put_request_sync(
-                            upload_url, data=video_data, headers={}, timeout=180
-                        )
-
-                        if status_code in [200, 201, 204]:
-                            bt.logging.info(
-                                f"Video uploaded successfully for task {task_id}"
-                            )
-                            upload_success = True
-                        else:
-                            bt.logging.error(
-                                f"Failed to upload video for task {task_id}: status code {status_code}, response: {response_text}"
-                            )
-                            retry_count += 1
-                            time.sleep(5)
-                    except Exception as e:
-                        bt.logging.error(
-                            f"Error uploading video for task {task_id}: {str(e)}"
-                        )
-                        bt.logging.error(traceback.format_exc())
-                        retry_count += 1
-                        time.sleep(5)
-
-                if not upload_success:
-                    bt.logging.error(
-                        f"Failed to upload video after {max_retries} attempts for task {task_id}"
-                    )
-            else:
-                bt.logging.info(
-                    f"No custom upload URL for task {task_id} or URL is empty"
-                )
-
-            # Update task status to completed
-            with self.task_lock:
-                if task_id in self.tasks:
-                    self.tasks[task_id]["status"] = "completed"
-                    self.tasks[task_id]["progress"] = 100
-                    self.tasks[task_id]["output_file"] = output_file
-                    self.tasks[task_id]["updated_at"] = time.time()
-
-            bt.logging.info(f"Task {task_id} completed successfully")
             return True
 
         except Exception as e:
-            bt.logging.error(f"Error running comfy workflow: {str(e)}")
+            bt.logging.error(f"Error submitting task {task_id}: {str(e)}")
             bt.logging.error(traceback.format_exc())
-
-            # Update task status to failed
             try:
                 with self.task_lock:
                     if task_id in self.tasks:
@@ -438,8 +311,284 @@ class VideoMiner(BaseMinerNeuron):
                         self.tasks[task_id]["updated_at"] = time.time()
             except:
                 pass
+            return False
+
+    def _poll_task_completion(self, task_id, upload_url, server_info):
+        """Poll for task completion status
+
+        Args:
+            task_id: Task ID
+            upload_url: Custom upload URL if any
+            server_info: Server info
+
+        Returns:
+            bool: Whether successful
+        """
+        try:
+            bt.logging.info(f"Starting to poll for task completion: {task_id}")
+
+            # Polling configuration
+            max_poll_time = 3600  # 1 hour max
+            poll_interval = 2  # 2 seconds
+            start_time = time.time()
+
+            while time.time() - start_time < max_poll_time:
+                # Get task status from ComfyUI
+                task_status = self.comfy_api.get_task_status(task_id, server_info["id"])
+
+                if not task_status:
+                    bt.logging.warning(
+                        f"Task status not found for {task_id}, retrying..."
+                    )
+                    time.sleep(poll_interval)
+                    continue
+
+                # Update local task progress
+                progress = task_status.get("progress", 0)
+                with self.task_lock:
+                    if task_id in self.tasks:
+                        self.tasks[task_id]["progress"] = progress
+                        self.tasks[task_id]["updated_at"] = time.time()
+
+                # Check if task is completed
+                if task_status.get("status") == "completed":
+                    bt.logging.info(f"Task {task_id} completed successfully")
+
+                    comfy_url = f"http://{server_info['host']}:{server_info['port']}"
+
+                    success, zip_path, error_msg = batch_download_and_package_outputs(
+                        task_status.get("output_info", {}),
+                        comfy_url,
+                        task_id,
+                        upload_url,
+                    )
+
+                    if not success:
+                        bt.logging.error(
+                            f"Batch download and package failed: {error_msg}"
+                        )
+                        with self.task_lock:
+                            if task_id in self.tasks:
+                                self.tasks[task_id]["status"] = "failed"
+                                self.tasks[task_id]["error_message"] = error_msg
+                                self.tasks[task_id]["updated_at"] = time.time()
+                        return False
+                    # Update task status
+                    with self.task_lock:
+                        if task_id in self.tasks:
+                            self.tasks[task_id]["status"] = "completed"
+                            self.tasks[task_id]["progress"] = 100
+                            self.tasks[task_id]["output_file"] = zip_path
+                            self.tasks[task_id]["updated_at"] = time.time()
+
+                    bt.logging.info(f"Task {task_id} completed successfully")
+                    bt.logging.info(
+                        f"Batch download and package outputs: {zip_path} and upload_url: {upload_url} upload_status: {success}"
+                    )
+
+                    return True
+
+                # Check if task failed
+                elif task_status.get("status") == "failed":
+                    error_msg = task_status.get("error_message", "Unknown error")
+                    bt.logging.error(f"Task {task_id} failed: {error_msg}")
+
+                    with self.task_lock:
+                        if task_id in self.tasks:
+                            self.tasks[task_id]["status"] = "failed"
+                            self.tasks[task_id]["error_message"] = error_msg
+                            self.tasks[task_id]["updated_at"] = time.time()
+
+                    return False
+
+                # Task still processing, wait and continue
+                time.sleep(poll_interval)
+
+            # Timeout reached
+            bt.logging.error(
+                f"Task {task_id} polling timeout after {max_poll_time} seconds"
+            )
+
+            with self.task_lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "failed"
+                    self.tasks[task_id]["error_message"] = "Task polling timeout"
+                    self.tasks[task_id]["updated_at"] = time.time()
 
             return False
+
+        except Exception as e:
+            bt.logging.error(f"Error polling task {task_id}: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+            with self.task_lock:
+                if task_id in self.tasks:
+                    self.tasks[task_id]["status"] = "failed"
+                    self.tasks[task_id]["error_message"] = str(e)
+                    self.tasks[task_id]["updated_at"] = time.time()
+
+            return False
+
+    def _upload_completed_video(self, task_id, upload_url):
+        """Upload completed video to specified URL
+
+        Args:
+            task_id: Task ID
+            upload_url: Upload URL
+
+        Returns:
+            bool: Whether upload successful
+        """
+        try:
+            bt.logging.info(f"Uploading video for task {task_id} to {upload_url}")
+
+            # Get task info
+            with self.task_lock:
+                if task_id not in self.tasks:
+                    bt.logging.error(f"Task {task_id} not found for upload")
+                    return False
+
+                task_info = self.tasks[task_id]
+                server_info = task_info.get("server_info", {})
+
+            # Maximum retry count
+            max_retries = 3
+            retry_count = 0
+            upload_success = False
+
+            while retry_count < max_retries and not upload_success:
+                try:
+                    # Get correct ComfyUI server address from server_info
+                    if server_info and "host" in server_info and "port" in server_info:
+                        host = server_info["host"]
+                        port = server_info["port"]
+                        comfy_url = f"http://{host}:{port}"
+                    else:
+                        # If no server info is obtained, use environment variable or default value
+                        comfy_url = os.environ.get(
+                            "COMFYUI_HOST", "http://127.0.0.1:8188"
+                        )
+
+                    # Get output file path for the task
+                    output_file = self.comfy_api.get_task_output_file(task_id)
+                    if not output_file:
+                        bt.logging.error(f"No output file found for task {task_id}")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+
+                    bt.logging.info(f"Found output file: {output_file}")
+
+                    filename = os.path.basename(output_file)
+                    video_download_url = (
+                        f"{comfy_url}/view?filename={filename}&type=output"
+                    )
+
+                    bt.logging.info(
+                        f"Downloading video from ComfyUI: {video_download_url}"
+                    )
+
+                    # Download video from ComfyUI
+                    video_data, status_code = http_get_request_sync(
+                        video_download_url, timeout=120
+                    )
+
+                    if status_code != 200 or video_data is None:
+                        bt.logging.error(
+                            f"Failed to download video from ComfyUI: {status_code}"
+                        )
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+
+                    # Check the size of the downloaded data
+                    data_size = len(video_data) if video_data else 0
+                    bt.logging.info(f"Downloaded video size: {data_size} bytes")
+
+                    if data_size == 0:
+                        bt.logging.error("Downloaded video data is empty")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+
+                    # Upload video to specified URL
+                    bt.logging.info(f"Uploading video to URL, size: {data_size} bytes")
+                    response_text, status_code = http_put_request_sync(
+                        upload_url, data=video_data, headers={}, timeout=180
+                    )
+
+                    if status_code in [200, 201, 204]:
+                        bt.logging.info(
+                            f"Video uploaded successfully for task {task_id}"
+                        )
+                        upload_success = True
+                    else:
+                        bt.logging.error(
+                            f"Failed to upload video for task {task_id}: status code {status_code}, response: {response_text}"
+                        )
+                        retry_count += 1
+                        time.sleep(5)
+
+                except Exception as e:
+                    bt.logging.error(
+                        f"Error uploading video for task {task_id}: {str(e)}"
+                    )
+                    bt.logging.error(traceback.format_exc())
+                    retry_count += 1
+                    time.sleep(5)
+
+            if not upload_success:
+                bt.logging.error(
+                    f"Failed to upload video after {max_retries} attempts for task {task_id}"
+                )
+                return False
+
+            return True
+
+        except Exception as e:
+            bt.logging.error(
+                f"Error in _upload_completed_video for task {task_id}: {str(e)}"
+            )
+            bt.logging.error(traceback.format_exc())
+            return False
+
+    def cleanup_comfy_tasks(self):
+        """Clean up completed ComfyUI tasks"""
+        try:
+            # Clean up completed tasks from ComfyUI API
+            cleaned_count = self.comfy_api.cleanup_completed_tasks(max_age_hours=1)
+            if cleaned_count > 0:
+                bt.logging.info(f"Cleaned up {cleaned_count} completed ComfyUI tasks")
+        except Exception as e:
+            bt.logging.error(f"Error cleaning up ComfyUI tasks: {str(e)}")
+
+    def get_comfy_server_status(self):
+        """Get status of all ComfyUI servers"""
+        try:
+            status_info = {}
+            for server in self.comfy_api.servers:
+                server_id = server["id"]
+                status = self.comfy_api.get_server_status(server_id)
+                if status:
+                    status_info[server_id] = status
+
+            return status_info
+        except Exception as e:
+            bt.logging.error(f"Error getting ComfyUI server status: {str(e)}")
+            return {}
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources when miner is shut down"""
+        try:
+            # Shutdown ComfyUI API
+            if hasattr(self, "comfy_api"):
+                self.comfy_api.shutdown()
+                bt.logging.info("ComfyUI API shutdown completed")
+        except Exception as e:
+            bt.logging.error(f"Error during miner shutdown: {str(e)}")
+
+        # Call parent cleanup
+        super().__exit__(exc_type, exc_val, exc_tb)
 
 
 # The main function parses the configuration and runs the miner.

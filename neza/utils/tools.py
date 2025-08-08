@@ -1,6 +1,7 @@
 import os
 import bittensor as bt
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict
+import mimetypes
 
 
 def _parse_env_servers(comfy_servers: str) -> List[Dict[str, str]]:
@@ -53,3 +54,39 @@ def merge_config(original_config, update_dict):
                 current_value[sub_key] = sub_value
         else:
             setattr(original_config, key, value)
+
+
+def check_mime(mime_type: str) -> str:
+    if not mime_type:
+        return "unknown"
+    mime_type = mime_type.lower()
+    if mime_type.startswith("video/"):
+        return "video"
+    elif mime_type.startswith("image/"):
+        if mime_type == "image/gif":
+            return "gif"
+        return "image"
+    elif mime_type.startswith("audio/"):
+        return "audio"
+    else:
+        return "unknown"
+
+
+def get_file_type(format_str: str, filename: str) -> str:
+    """
+    Get file type from format and filename
+
+    Args:
+        format: MIME type
+        filename: Filename
+
+    Returns:
+        str: File type
+    """
+    if format_str:
+        file_type = check_mime(format_str)
+        if file_type != "unknown":
+            return file_type
+
+    mime_type, _ = mimetypes.guess_type(filename or "")
+    return check_mime(mime_type)

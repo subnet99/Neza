@@ -14,7 +14,7 @@ import wandb
 
 from neza.base.validator import BaseValidatorNeuron
 from neza.api.utils import set_validator
-from neza.utils.material_manager import MaterialManager
+from neza.utils.config_manager import ConfigManager
 from neza.validator.verify import VideoVerifier
 
 # Import validator modules
@@ -47,20 +47,6 @@ class VideoValidator(BaseValidatorNeuron):
         self.validator_config = ValidatorConfig(self.config)
         self.task_counter = 0
 
-        # Initialize material manager
-        self.material_manager = MaterialManager(self)
-        bt.logging.info("Initializing material manager...")
-        success = self.material_manager.initialize()
-        if success:
-            bt.logging.info("Material initialization successful")
-        else:
-            bt.logging.warning(
-                "Material initialization failed, will retry on block callback"
-            )
-
-        # Get workflow mapping configuration
-        self.workflow_mapping = self.material_manager.get_workflow_mapping()
-
         # Initialize video verifier
         self.verifier = VideoVerifier(self)
         self.video_manager = VideoManager()
@@ -70,6 +56,7 @@ class VideoValidator(BaseValidatorNeuron):
         self.penalty_manager = PenaltyManager(self)
         self.task_manager = TaskManager(self)
         self.verification_manager = VerificationManager(self)
+        self.config_manager = ConfigManager(self)
 
         # Initialize score manager
         self.score_manager = MinerScoreManager(self.validator_config, self)
@@ -95,7 +82,6 @@ class VideoValidator(BaseValidatorNeuron):
         # Register block callbacks
         self.register_block_callback(self.miner_manager.update_miners_on_block)
         self.register_block_callback(self.manage_verification_cycle)
-        self.register_block_callback(self.update_materials_on_block)
         self.register_block_callback(self.adjust_config_on_block)
         self.register_block_callback(self.move_scores_on_interval)
         self.register_block_callback(self.task_manager.process_tasks_on_block)
@@ -121,7 +107,9 @@ class VideoValidator(BaseValidatorNeuron):
         """
         Validator forward pass, handles task scheduling and monitoring
         """
-        await asyncio.sleep(1800)
+        bt.logging.info("start forward")
+        await self.task_manager._check_active_tasks_optimized()
+        await asyncio.sleep(30)
 
     def manage_verification_cycle(self, block):
         """
@@ -185,41 +173,6 @@ class VideoValidator(BaseValidatorNeuron):
                 f"Adjusting verification workers from {self.verification_manager.get_worker_count()} to {new_worker_count}"
             )
             self.verification_manager.adjust_verification_workers(new_worker_count)
-
-    def update_materials_on_block(self, block):
-        """
-        Updates materials on block callback
-
-        Args:
-            block: Current block number
-        """
-        # Update materials every 100 blocks
-        if block % 100 == 0:
-            bt.logging.info(f"Updating materials on block {block}")
-
-            # Run update in background thread
-            def run_update():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(self._update_materials_async(block))
-                except Exception as e:
-                    bt.logging.error(f"Error updating materials: {str(e)}")
-                    bt.logging.error(traceback.format_exc())
-                finally:
-                    loop.close()
-
-            update_thread = threading.Thread(target=run_update, daemon=True)
-            update_thread.start()
-
-    async def _update_materials_async(self, block):
-        """Asynchronously updates materials"""
-        bt.logging.info("Refreshing materials...")
-        success = await self.material_manager._update_materials_info(force=False)
-        if success:
-            bt.logging.info("Materials refreshed successfully")
-        else:
-            bt.logging.warning("Failed to refresh materials")
 
     def update_base_scores(self):
         """
@@ -440,13 +393,14 @@ class VideoValidator(BaseValidatorNeuron):
     def _submit_weights(self, available_uids, weight_vector):
         """Submits weights to blockchain"""
         try:
-            self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=available_uids,
-                weights=weight_vector[available_uids],
-                wait_for_inclusion=False,
-            )
+            with self._subtensor_lock:
+                self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
+                    uids=available_uids,
+                    weights=weight_vector[available_uids],
+                    wait_for_inclusion=False,
+                )
             bt.logging.info(
                 f"Successfully set weights for {len(available_uids)} miners"
             )
@@ -479,13 +433,14 @@ class VideoValidator(BaseValidatorNeuron):
             self._log_default_weights(available_uids, default_weight)
 
             # Submit weights
-            self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=available_uids,
-                weights=weight_vector[available_uids],
-                wait_for_inclusion=False,
-            )
+            with self._subtensor_lock:
+                self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
+                    uids=available_uids,
+                    weights=weight_vector[available_uids],
+                    wait_for_inclusion=False,
+                )
             bt.logging.info(
                 f"Successfully set default weights for {len(available_uids)} miners"
             )
@@ -566,7 +521,7 @@ class VideoValidator(BaseValidatorNeuron):
         # Run update in background thread
         def run_update():
             try:
-                self.material_manager.update_config()
+                self.config_manager.update_config()
                 bt.logging.info("Config updated successfully")
             except Exception as e:
                 bt.logging.error(f"Error updating config: {str(e)}")

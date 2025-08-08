@@ -1,5 +1,3 @@
-import time
-import typing
 import bittensor as bt
 
 

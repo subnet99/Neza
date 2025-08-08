@@ -35,7 +35,10 @@ class MinerManager:
         """
         Initializes miner cache
         """
-        self._update_miners_in_thread(self.validator.subtensor.get_current_block())
+        # Use lock to prevent WebSocket concurrency issues
+        with self.validator._subtensor_lock:
+            current_block = self.validator.subtensor.get_current_block()
+        self._update_miners_in_thread(current_block)
 
     def update_miners_on_block(self, block):
         """
@@ -74,7 +77,8 @@ class MinerManager:
             # Refresh metagraph
             if hasattr(metagraph, "sync") and callable(metagraph.sync):
                 bt.logging.info(f"Syncing metagraph on block {block}")
-                metagraph.sync(subtensor=self.validator.subtensor)
+                with self.validator._subtensor_lock:
+                    metagraph.sync(subtensor=self.validator.subtensor)
 
             # Update miner information
             bt.logging.debug(f"Updating miner information on block {block}")
@@ -152,7 +156,6 @@ class MinerManager:
 
         except Exception as e:
             bt.logging.error(f"Error in _update_miners_in_thread: {str(e)}")
-            bt.logging.error(traceback.format_exc())
 
     def _update_available_miners_sync(self):
         """Synchronously updates available miners list"""
@@ -228,21 +231,6 @@ class MinerManager:
         Returns:
             List of available miner UIDs
         """
-        # Check if cache is empty or expired
-        current_time = time.time()
-        if (
-            self.available_miners_cache is None
-            or current_time - self.miners_cache_time > self.miners_cache_ttl
-        ):
-            bt.logging.debug("Miners cache empty or expired, forcing update")
-
-            # Don't try to update cache here - just return empty list if cache is empty
-            # This avoids event loop conflicts
-            if self.available_miners_cache is None:
-                return []
-
-            # If cache exists but expired, we can still use it while waiting for update
-            # The update will happen in the background via update_miners_on_block
 
         return self.available_miners_cache or []
 

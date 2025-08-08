@@ -379,7 +379,7 @@ class ValidatorDatabase(DatabaseConnection):
             )
 
             # Update miner active status and task count
-            current_time = time.time()
+            current_utc_time = datetime.now(timezone.utc)
             cursor.execute(
                 """
             UPDATE miners
@@ -389,7 +389,7 @@ class ValidatorDatabase(DatabaseConnection):
                 last_active = %s
             WHERE hotkey = %s
             """,
-                (datetime.now(timezone.utc), miner_hotkey),
+                (current_utc_time, current_utc_time, miner_hotkey),
             )
 
             # If miner doesn't exist, create a new record
@@ -399,7 +399,7 @@ class ValidatorDatabase(DatabaseConnection):
                 INSERT INTO miners (hotkey, last_task_time, active_tasks, is_active, created_at, last_active)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                    (miner_hotkey, current_time, 1, True, now, now),
+                    (miner_hotkey, current_utc_time, 1, True, now, now),
                 )
 
             conn.commit()
@@ -763,6 +763,7 @@ class ValidatorDatabase(DatabaseConnection):
             """,
                 (
                     timeout_at,
+                    miner_hotkey,
                     timeout_at,
                     new_retry_count,
                     task_id,
@@ -1018,7 +1019,7 @@ class ValidatorDatabase(DatabaseConnection):
             if conn:
                 conn.close()
 
-    def add_task(self, task_id, workflow_params, secret_key, timeout_seconds=600):
+    def add_task(self, task_id, complete_workflow, secret_key, timeout_seconds=600):
         """Add new task"""
         conn = None
         try:
@@ -1029,15 +1030,13 @@ class ValidatorDatabase(DatabaseConnection):
             cursor.execute(
                 """
             INSERT INTO tasks (
-                task_id, workflow_params, status, created_at, updated_at, 
+                task_id, complete_workflow, status, created_at, updated_at, 
                 timeout_seconds, secret_key
             ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
                 (
                     task_id,
-                    json.dumps(
-                        workflow_params
-                    ),  # Serialize workflow parameters as JSON
+                    json.dumps(complete_workflow),
                     "pending",
                     datetime.now(timezone.utc),
                     datetime.now(timezone.utc),
@@ -1576,17 +1575,25 @@ class ValidatorDatabase(DatabaseConnection):
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # Update task preview URL, upload URL and status
+            # Update task preview URL, upload URL, status and miner_hotkey
             cursor.execute(
                 """
             UPDATE tasks SET 
                 s3_video_url = %s,
                 s3_upload_url = %s,
                 status = %s,
+                miner_hotkey = %s,
                 updated_at = %s
             WHERE task_id = %s
             """,
-                (preview_url, upload_url, status, datetime.now(timezone.utc), task_id),
+                (
+                    preview_url,
+                    upload_url,
+                    status,
+                    miner_hotkey,
+                    datetime.now(timezone.utc),
+                    task_id,
+                ),
             )
 
             # If miner public key is provided, update miner record
@@ -1950,6 +1957,117 @@ class ValidatorDatabase(DatabaseConnection):
             if conn:
                 conn.rollback()
             return False
+        finally:
+            if conn:
+                conn.close()
+
+    def batch_update_timeout_tasks_with_scores(self, timeout_tasks):
+        """Batch update timeout tasks with status and scores in one operation
+
+        Args:
+            timeout_tasks: List of tuples (task_id, miner_hotkey, score)
+        """
+        if not timeout_tasks:
+            return True
+
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+
+            # Get current time
+            now = datetime.now(timezone.utc)
+
+            # Create placeholders for the IN clause
+            task_ids = [task_id for task_id, _, _ in timeout_tasks]
+            placeholders = ",".join(["%s"] * len(task_ids))
+
+            # Batch update task status and score for all timeout tasks
+            cursor.execute(
+                f"""
+            UPDATE tasks 
+            SET status = 'failed',
+                score = 0.0,
+                updated_at = %s
+            WHERE task_id IN ({placeholders})
+            """,
+                (now,) + tuple(task_ids),
+            )
+
+            # Add task history records for all tasks
+            history_records = []
+            for task_id, miner_hotkey, score in timeout_tasks:
+                history_records.append(
+                    (
+                        task_id,
+                        "failed",
+                        now,
+                        f"Batch timeout update: Task scored {score}, status set to failed",
+                    )
+                )
+
+            # Use executemany for batch insert
+            cursor.executemany(
+                """
+            INSERT INTO task_history (task_id, status, timestamp, details)
+            VALUES (%s, %s, %s, %s)
+            """,
+                history_records,
+            )
+
+            conn.commit()
+            bt.logging.info(
+                f"Batch updated {len(timeout_tasks)} timeout tasks with scores"
+            )
+            return True
+        except Exception as e:
+            bt.logging.error(
+                f"Error in batch updating timeout tasks with scores: {str(e)}"
+            )
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
+
+    def batch_get_tasks(self, task_ids):
+        """Get multiple tasks by IDs
+
+        Args:
+            task_ids: List of task IDs to retrieve
+
+        Returns:
+            List of task dictionaries
+        """
+        if not task_ids:
+            return []
+
+        conn = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+
+            # Create placeholders for the IN clause
+            placeholders = ",".join(["%s"] * len(task_ids))
+
+            cursor.execute(
+                f"""
+            SELECT * FROM tasks WHERE task_id IN ({placeholders})
+            """,
+                tuple(task_ids),
+            )
+
+            results = cursor.fetchall()
+            if results:
+                # Convert to list of dicts
+                columns = [desc[0] for desc in cursor.description]
+                return [dict(zip(columns, row)) for row in results]
+            return []
+
+        except Exception as e:
+            bt.logging.error(f"Error batch getting tasks: {str(e)}")
+            return []
         finally:
             if conn:
                 conn.close()
