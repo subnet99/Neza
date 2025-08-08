@@ -221,7 +221,7 @@ class VideoVerifier:
 
             downloaded_files = batch_download_outputs(
                 output_info,
-                f"http://{server_info["host"]}:{server_info["port"]}",
+                f"http://{server_info['host']}:{server_info['port']}",
                 out_dir,
             )
 
