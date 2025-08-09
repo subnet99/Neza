@@ -426,7 +426,7 @@ class ComfyWSAPI:
                         task["output_info"] = output_info
                     if execution_time:
                         task["execution_time"] = execution_time
-                    bt.logging.info(f"Task {task_id} status: {task["status"]}")
+                    bt.logging.info(f"Task {task_id} status: {task['status']}")
                     break
 
         except Exception as e:
