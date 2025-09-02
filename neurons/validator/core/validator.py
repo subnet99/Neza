@@ -220,16 +220,20 @@ class VideoValidator(BaseValidatorNeuron):
             adjusted_scores = np.zeros(self.metagraph.n, dtype=np.float32)
             len_score = len(self.scores)
             available_miners = self.miner_manager.get_available_miners_cache()
-
+            comfy_servers = self.validator_config.comfy_servers
+            base_ratio = 0.5 if comfy_servers else 0
+            consensus_ratio = 0.5 if comfy_servers else 1
             for uid, value in enumerate(consensus_scores_array):
                 try:
                     if uid not in available_miners:
                         adjusted_scores[uid] = 0.0
                         continue
                     if uid < len_score:
-                        adjusted_scores[uid] = value * 0.5 + self.scores[uid] * 0.5
+                        adjusted_scores[uid] = (
+                            value * consensus_ratio + self.scores[uid] * base_ratio
+                        )
                     else:
-                        adjusted_scores[uid] = value * 0.5
+                        adjusted_scores[uid] = value * consensus_ratio
                 except Exception as e:
                     bt.logging.error(f"Error processing UID {uid}: {str(e)}")
                     continue

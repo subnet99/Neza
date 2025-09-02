@@ -393,7 +393,14 @@ class TaskManager:
 
             # Get comfy servers count
             comfy_servers = self.validator.validator_config.comfy_servers
-            comfy_server_count = len(comfy_servers) if comfy_servers else 1
+
+            if not comfy_servers:
+                bt.logging.info(
+                    "No comfy servers configured, skipping synthetic task fetching. "
+                )
+                return 0
+
+            comfy_server_count = len(comfy_servers)
 
             # Count miners with capacity
             available_count = len(miners_with_capacity)

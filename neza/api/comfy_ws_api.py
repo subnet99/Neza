@@ -28,44 +28,45 @@ class ComfyWSAPI:
         self.server_tasks = {}  # Task queue for each server: server_id -> [task_info]
         self.running = False
 
-        # Process each server configuration
-        for server in servers:
-            host = server.get("host", "127.0.0.1")
-            port = server.get("port", "8188")
+        if servers:
+            # Process each server configuration
+            for server in servers:
+                host = server.get("host", "127.0.0.1")
+                port = server.get("port", "8188")
 
-            # Ensure host doesn't include protocol prefix
-            if host.startswith("http://"):
-                host = host[7:]
-            elif host.startswith("https://"):
-                host = host[8:]
+                # Ensure host doesn't include protocol prefix
+                if host.startswith("http://"):
+                    host = host[7:]
+                elif host.startswith("https://"):
+                    host = host[8:]
 
-            # Check if hostname contains port
-            if ":" in host:
-                host_parts = host.split(":")
-                host = host_parts[0]
-                if len(host_parts) > 1 and host_parts[1]:
-                    port = host_parts[1]
+                # Check if hostname contains port
+                if ":" in host:
+                    host_parts = host.split(":")
+                    host = host_parts[0]
+                    if len(host_parts) > 1 and host_parts[1]:
+                        port = host_parts[1]
 
-            server_id = f"{host}:{port}"
-            self.servers.append(
-                {
-                    "id": server_id,
-                    "host": host,
-                    "port": port,
-                    "client_id": str(uuid.uuid4()),
-                    "available": False,  # Whether server is available
-                    "ws_connected": False,  # Whether WebSocket is connected
-                }
-            )
+                server_id = f"{host}:{port}"
+                self.servers.append(
+                    {
+                        "id": server_id,
+                        "host": host,
+                        "port": port,
+                        "client_id": str(uuid.uuid4()),
+                        "available": False,  # Whether server is available
+                        "ws_connected": False,  # Whether WebSocket is connected
+                    }
+                )
 
-            # Initialize task queue for this server
-            self.server_tasks[server_id] = []
+                # Initialize task queue for this server
+                self.server_tasks[server_id] = []
 
-        # Check if ComfyUI servers are available and start WebSocket connections
-        for server in self.servers:
-            self._check_server_availability(server, clear_queue)
-            if server["available"]:
-                self._start_websocket_manager(server)
+            # Check if ComfyUI servers are available and start WebSocket connections
+            for server in self.servers:
+                self._check_server_availability(server, clear_queue)
+                if server["available"]:
+                    self._start_websocket_manager(server)
 
         # Start task processing thread
         self.running = True
