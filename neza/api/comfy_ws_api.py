@@ -26,6 +26,7 @@ class ComfyWSAPI:
         self.servers = []
         self.ws_managers = {}  # WebSocket managers for each server
         self.server_tasks = {}  # Task queue for each server: server_id -> [task_info]
+        self.server_queue_prompt_ids = {}
         self.running = False
 
         if servers:
@@ -56,11 +57,14 @@ class ComfyWSAPI:
                         "client_id": str(uuid.uuid4()),
                         "available": False,  # Whether server is available
                         "ws_connected": False,  # Whether WebSocket is connected
+                        "token": server.get("token"),  # Store token if available
                     }
                 )
 
                 # Initialize task queue for this server
                 self.server_tasks[server_id] = []
+                # Initialize prompt_ids set for this server
+                self.server_queue_prompt_ids[server_id] = set()
 
             # Check if ComfyUI servers are available and start WebSocket connections
             for server in self.servers:
@@ -87,12 +91,18 @@ class ComfyWSAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Add timeout setting
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.get(
-                f"{host_for_http}:{server['port']}/queue", timeout=30
+                f"{host_for_http}:{server['port']}/queue", headers=headers, timeout=30
             )
             if response.status_code == 200:
                 bt.logging.info(f"ComfyUI server ****:{server['port']} is available.")
                 server["available"] = True
+                self._update_server_queue_prompt_ids(server["id"], response.json())
+
                 if clear_queue:
                     self.clear_server_queue(server)
                     self.interrupt_server_processing(server)
@@ -119,6 +129,11 @@ class ComfyWSAPI:
 
             ws_url = f"{host_for_ws}:{server['port']}/ws?clientId={server['client_id']}"
 
+            # Prepare headers for WebSocket connection
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             # Create WebSocket manager
             ws_manager = WebSocketManager(
                 server_id=server["id"],
@@ -128,6 +143,7 @@ class ComfyWSAPI:
                 client_id=server["client_id"],
                 on_message_callback=self._handle_ws_message,
                 on_status_change_callback=self._handle_ws_status_change,
+                headers=headers,
             )
 
             # Start WebSocket manager
@@ -157,7 +173,9 @@ class ComfyWSAPI:
             server = next((s for s in self.servers if s["id"] == server_id), None)
             if not server:
                 return
-
+            if message_type == "status":
+                self._check_tasks_in_queue(data, server)
+                return
             if message_type == "progress_state":
                 # Use WebSocket throttled handler for progress_state messages
                 prompt_id = data.get("data", {}).get("prompt_id")
@@ -394,6 +412,69 @@ class ComfyWSAPI:
         except Exception as e:
             bt.logging.error(f"Error handling execution_error: {str(e)}")
 
+    def _update_server_queue_prompt_ids(
+        self, server_id: str, queue_data: Dict[str, Any]
+    ) -> None:
+        """
+        Update prompt_ids from queue data for a server
+
+        Args:
+            server_id: Server ID
+            queue_data: Queue data from /queue API or status message
+        """
+        try:
+            prompt_ids = set()
+
+            queue_running = queue_data.get("queue_running", [])
+            for item in queue_running:
+                if isinstance(item, list) and len(item) > 1:
+                    prompt_id = item[1]  # prompt_id is the second element
+                    if isinstance(prompt_id, str):
+                        prompt_ids.add(prompt_id)
+
+            queue_pending = queue_data.get("queue_pending", [])
+            for item in queue_pending:
+                if isinstance(item, list) and len(item) > 1:
+                    prompt_id = item[1]  # prompt_id is the second element
+                    if isinstance(prompt_id, str):
+                        prompt_ids.add(prompt_id)
+
+            self.server_queue_prompt_ids[server_id] = prompt_ids
+
+        except Exception as e:
+            bt.logging.error(f"Error updating server queue prompt_ids: {str(e)}")
+
+    def _check_tasks_in_queue(
+        self, status_data: Dict[str, Any], server: Dict[str, Any]
+    ) -> None:
+        """
+        Check if pending and submitted tasks are still in the queue
+        If not, mark them as failed
+
+        Args:
+            status_data: Status message data from WebSocket
+            server: Server configuration
+        """
+        try:
+            server_id = server["id"]
+            queue_prompt_ids = self.server_queue_prompt_ids.get(server_id, set())
+
+            tasks = self.server_tasks.get(server_id, [])
+            for task in tasks:
+                task_status = task.get("status")
+                prompt_id = task.get("prompt_id")
+
+                if task_status in ["pending", "submitted"] and prompt_id:
+                    if prompt_id not in queue_prompt_ids:
+                        bt.logging.warning(
+                            f"Task {task['task_id']} (prompt_id: {prompt_id}) not found in queue, marking as failed"
+                        )
+                        task["status"] = "failed"
+                        task["error_message"] = "Task not found in server queue"
+
+        except Exception as e:
+            bt.logging.error(f"Error checking tasks in queue: {str(e)}")
+
     def _find_task_by_prompt_id(
         self, prompt_id: str, server_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -488,12 +569,18 @@ class ComfyWSAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.get(
-                f"{host_for_http}:{server['port']}/queue", timeout=10
+                f"{host_for_http}:{server['port']}/queue", headers=headers, timeout=10
             )
 
             if response.status_code == 200:
                 queue_data = response.json()
+                self._update_server_queue_prompt_ids(server["id"], queue_data)
+
                 running = len(queue_data.get("queue_running", []))
                 pending = len(queue_data.get("queue_pending", []))
                 return running + pending
@@ -574,8 +661,13 @@ class ComfyWSAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Submit workflow to ComfyUI
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.post(
                 f"{host_for_http}:{server['port']}/prompt",
+                headers=headers,
                 json={
                     "prompt": task["workflow_params"],
                     "client_id": server["client_id"],
@@ -590,6 +682,9 @@ class ComfyWSAPI:
                 if prompt_id:
                     task["prompt_id"] = prompt_id
                     task["status"] = "submitted"
+
+                    server_id = server["id"]
+                    self.server_queue_prompt_ids[server_id].add(prompt_id)
 
                     # Initialize all nodes from workflow
                     self._initialize_nodes_from_workflow(task, task["workflow_params"])
@@ -689,6 +784,7 @@ class ComfyWSAPI:
             "host": server["host"],
             "port": server["port"],
             "id": server["id"],
+            "token": server.get("token"),
         }
 
         # Double-check server availability
@@ -806,8 +902,13 @@ class ComfyWSAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.post(
                 f"{host_for_http}:{server['port']}/queue",
+                headers=headers,
                 json={"clear": True} if task_id is None else {"delete": [task_id]},
                 timeout=20,
             )
@@ -844,8 +945,13 @@ class ComfyWSAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.post(
                 f"{host_for_http}:{server['port']}/interrupt",
+                headers=headers,
                 timeout=20,
             )
 
@@ -919,6 +1025,7 @@ class ComfyWSAPI:
                 "ws_connected": self.is_server_connected(server_id),
                 "task_count": len(self.server_tasks.get(server_id, [])),
                 "load": self._get_server_load(server),
+                "token": server.get("token"),
             }
         return None
 
@@ -945,8 +1052,13 @@ class ComfyWSAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Add timeout setting
+            headers = {}
+            if server_info.get("token"):
+                headers["Authorization"] = f"Bearer {server_info['token']}"
+
             response = requests.get(
                 f"{host_for_http}:{server_info['port']}/history/{task_info['prompt_id']}",
+                headers=headers,
                 timeout=60,
             )
             if response.status_code == 200:

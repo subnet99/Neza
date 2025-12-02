@@ -214,6 +214,7 @@ class VideoValidator(BaseValidatorNeuron):
         """
         Obtain the consensus score from the API and combine it with the original score of the current validator.
         The consensus score and the original score each account for 50%.
+        If ComfyUI is unavailable or verification errors >= 3, use 100% consensus score for all miners.
         """
         try:
             consensus_scores_array = get_consensus_scores_sync()
@@ -221,8 +222,13 @@ class VideoValidator(BaseValidatorNeuron):
             len_score = len(self.scores)
             available_miners = self.miner_manager.get_available_miners_cache()
             comfy_servers = self.validator_config.comfy_servers
-            base_ratio = 0.5 if comfy_servers else 0
-            consensus_ratio = 0.5 if comfy_servers else 1
+            use_consensus_only = (
+                not comfy_servers or self.score_manager.should_use_consensus_only()
+            )
+
+            base_ratio = 0 if use_consensus_only else 0.5
+            consensus_ratio = 1.0 if use_consensus_only else 0.5
+
             for uid, value in enumerate(consensus_scores_array):
                 try:
                     if uid not in available_miners:

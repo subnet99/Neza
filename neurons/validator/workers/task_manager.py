@@ -91,8 +91,8 @@ class TaskManager:
         # Block is already the block number (integer)
         block_number = block
 
-        # Only process tasks every 10 blocks (approximately every 120 seconds)
-        if block_number % 10 == 0:
+        # Only process tasks every 5 blocks (approximately every 60 seconds)
+        if block_number % 5 == 0:
             bt.logging.info(f"Processing tasks on block {block_number}")
             if self.validator.miner_info_cache is None:
                 bt.logging.warning("No miner data available, skipping task processing")

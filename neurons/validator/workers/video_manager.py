@@ -216,19 +216,24 @@ class VideoManager:
             files_mapping = {}
 
             for node_id, node_output in outputs_info.items():
+                if not isinstance(node_output, dict):
+                    continue
 
                 for output_type, file_list in node_output.items():
-                    # Filter by file types if specified
                     if file_types and output_type not in file_types:
+                        continue
+
+                    if not isinstance(file_list, list):
                         continue
 
                     file_paths = []
                     for file_info in file_list:
+                        if not isinstance(file_info, dict):
+                            continue
+
                         filename = file_info.get("filename")
                         if filename:
-                            # Use the actual naming format from batch_download_outputs
                             save_filename = f"{node_id}_{output_type}_{filename}"
-                            # Construct full path to extracted file
                             file_path = os.path.join(extracted_dir, save_filename)
 
                             if os.path.exists(file_path):

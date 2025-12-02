@@ -791,7 +791,7 @@ def get_consensus_scores_sync():
 
 
 def batch_download_outputs(
-    outputs: dict, comfy_url: str, out_dir: str, timeout: int = 120
+    outputs: dict, comfy_url: str, out_dir: str, timeout: int = 120, token: str = None
 ) -> list[str]:
     """
     Batch download all output files from ComfyUI, rename by node
@@ -803,7 +803,11 @@ def batch_download_outputs(
         # Download all output files and rename by node
         for node, node_output in outputs.items():
             for key in node_output:
+                if not isinstance(node_output[key], list):
+                    continue
                 for fileinfo in node_output[key]:
+                    if not isinstance(fileinfo, dict):
+                        continue
                     filename = fileinfo.get("filename")
                     file_type = fileinfo.get("type")
                     subfolder = fileinfo.get("subfolder")
@@ -811,8 +815,12 @@ def batch_download_outputs(
                         continue
 
                     file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={urllib.parse.quote(subfolder)}"
+                    headers = {}
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+
                     response, status_code = http_get_request_sync(
-                        file_url, timeout=timeout
+                        file_url, headers=headers, timeout=timeout
                     )
 
                     if status_code == 200 and response:
@@ -868,6 +876,7 @@ def batch_download_and_package_outputs(
     task_id: str,
     upload_url: str = None,
     timeout: int = 120,
+    token: str = None,
 ) -> tuple[bool, str, str]:
     """
     Batch download all output files from ComfyUI, rename by node, package with outputs.json and upload
@@ -878,6 +887,7 @@ def batch_download_and_package_outputs(
         task_id: Task ID for naming
         upload_url: Optional upload URL for the final zip
         timeout: Download timeout in seconds
+        token: ComfyUI authentication token
 
     Returns:
         tuple[bool, str, str]: (success, zip_path, error_message)
@@ -887,7 +897,9 @@ def batch_download_and_package_outputs(
         # Create temporary directory for files
         out_dir = f"tmp_tasks/{task_id}"
 
-        downloaded_files = batch_download_outputs(outputs, comfy_url, out_dir, timeout)
+        downloaded_files = batch_download_outputs(
+            outputs, comfy_url, out_dir, timeout, token=token
+        )
         if not downloaded_files:
             return False, "", "No files were successfully downloaded"
 

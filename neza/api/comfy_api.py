@@ -48,6 +48,7 @@ class ComfyAPI:
                     "client_id": str(uuid.uuid4()),
                     "task_results": {},  # Task result dictionary, prompt_id -> result
                     "available": False,  # Whether server is available
+                    "token": server.get("token"),  # Store token if available
                 }
             )
 
@@ -67,8 +68,12 @@ class ComfyAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Add timeout setting
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.get(
-                f"{host_for_http}:{server['port']}/queue", timeout=30
+                f"{host_for_http}:{server['port']}/queue", headers=headers, timeout=30
             )
             if response.status_code == 200:
                 bt.logging.info(f"ComfyUI server ***:{server['port']} is available.")
@@ -108,8 +113,12 @@ class ComfyAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Add timeout setting
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.get(
-                f"{host_for_http}:{server['port']}/queue", timeout=10
+                f"{host_for_http}:{server['port']}/queue", headers=headers, timeout=10
             )
             if response.status_code == 200:
                 data = response.json()
@@ -278,8 +287,12 @@ class ComfyAPI:
                 host_for_http = f"http://{host_for_http}"
 
             # Add timeout setting
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.get(
-                f"{host_for_http}:{server['port']}/history/{prompt_id}", timeout=60
+                f"{host_for_http}:{server['port']}/history/{prompt_id}", headers=headers, timeout=60
             )
             if response.status_code == 200:
                 response_data = response.json()
@@ -381,8 +394,13 @@ class ComfyAPI:
             # Add timeout setting
             try:
                 start_time = time.time()
+                headers = {}
+                if server.get("token"):
+                    headers["Authorization"] = f"Bearer {server['token']}"
+
                 response = requests.post(
                     f"{host_for_http}:{server['port']}/prompt",
+                    headers=headers,
                     json={
                         "prompt": workflow,
                         "client_id": server["client_id"],
@@ -439,7 +457,7 @@ class ComfyAPI:
                     if comfy_execution_time is not None:
                         elapsed_time = comfy_execution_time
                     # Return server info
-                    server_info = {"host": server["host"], "port": server["port"]}
+                    server_info = {"host": server["host"], "port": server["port"], "token": server.get("token")}
                     return True, history_result[0], server_info, comfy_execution_time
 
                 elapsed_time = time.time() - start_time
@@ -457,7 +475,7 @@ class ComfyAPI:
             )
 
             # Return server info
-            server_info = {"host": server["host"], "port": server["port"]}
+            server_info = {"host": server["host"], "port": server["port"], "token": server.get("token")}
             return True, video_result, server_info, execution_time
 
         except Exception as e:
@@ -495,8 +513,13 @@ class ComfyAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.post(
                 f"{host_for_http}:{server['port']}/queue",
+                headers=headers,
                 json={"clear": True},
                 timeout=20,
             )
@@ -533,8 +556,12 @@ class ComfyAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
+            headers = {}
+            if server.get("token"):
+                headers["Authorization"] = f"Bearer {server['token']}"
+
             response = requests.post(
-                f"{host_for_http}:{server['port']}/interrupt", timeout=20
+                f"{host_for_http}:{server['port']}/interrupt", headers=headers, timeout=20
             )
 
             if response.status_code == 200:

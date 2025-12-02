@@ -254,6 +254,7 @@ class VerificationManager:
                             f"Error checking ComfyUI server availability: {str(e)}"
                         )
                         bt.logging.error(traceback.format_exc())
+                        self.validator.score_manager.record_verification_error()
                         await asyncio.sleep(30)
                         continue
 
@@ -322,6 +323,7 @@ class VerificationManager:
                     bt.logging.error(
                         f"Verification timeout for task {task_id} after {verification_timeout}s"
                     )
+                    self.validator.score_manager.record_verification_error()
                     # Update as verification failed
                     await self._update_verification_failed(
                         task_id, miner_hotkey, miner_uid
@@ -330,6 +332,7 @@ class VerificationManager:
                 except Exception as e:
                     bt.logging.error(f"Error verifying task {task_id}: {str(e)}")
                     bt.logging.error(traceback.format_exc())
+                    self.validator.score_manager.record_verification_error()
                     # Update as verification failed
                     await self._update_verification_failed(
                         task_id, miner_hotkey, miner_uid
@@ -448,6 +451,7 @@ class VerificationManager:
             time_str = (
                 f"{verification_time:.2f}" if verification_time is not None else "None"
             )
+            self.validator.score_manager.record_verification_success()
             bt.logging.info(
                 f"Task {task_id} verified in {time_str}s with score {score_str}"
             )
@@ -457,6 +461,7 @@ class VerificationManager:
                 f"Error executing verification for task {task_id}: {str(e)}"
             )
             bt.logging.error(traceback.format_exc())
+            self.validator.score_manager.record_verification_error()
             # Update task status to verification failed when error occurs
             await self._update_verification_failed(task_id, miner_hotkey, miner_uid)
             raise

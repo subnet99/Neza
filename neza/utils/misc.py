@@ -104,7 +104,7 @@ def ttl_get_block(self) -> int:
         return self.subtensor.get_current_block()
 
 
-def copy_audio_wav(video_path: str, output_wav: str):
+def copy_audio_wav(video_path: str, output_wav: str) -> bool:
     """
     Extract audio from video file to 16-bit PCM WAV format.
 
@@ -113,9 +113,21 @@ def copy_audio_wav(video_path: str, output_wav: str):
         output_wav: Path to output WAV file
 
     Returns:
-        None
+        bool: True if audio was extracted successfully, False if video has no audio track
     """
     try:
+        # Check if video has audio stream
+        probe = ffmpeg.probe(video_path)
+        has_audio = any(
+            stream.get("codec_type") == "audio" for stream in probe.get("streams", [])
+        )
+
+        if not has_audio:
+            bt.logging.warning(
+                f"Video {video_path} has no audio track, skipping audio extraction"
+            )
+            return False
+
         (
             ffmpeg.input(video_path)
             .output(
@@ -128,6 +140,8 @@ def copy_audio_wav(video_path: str, output_wav: str):
             .overwrite_output()
             .run(quiet=True)
         )
+        return True
     except Exception as e:
         bt.logging.error(f"Error extracting audio: {str(e)}")
         bt.logging.error(traceback.format_exc())
+        return False

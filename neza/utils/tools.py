@@ -10,14 +10,19 @@ def _parse_env_servers(comfy_servers: str) -> List[Dict[str, str]]:
 
     Environment variable format: COMFYUI_SERVERS=host1:port1,host2:port2,...
     If COMFYUI_SERVERS is not set, default to "127.0.0.1:8188"
+    Also parses COMFYUI_TOKENS if available
 
     Returns:
         List[Dict[str, str]]: List of server configurations
     """
     try:
         servers = []
+        # Parse tokens if available
+        tokens_str = os.environ.get("COMFYUI_TOKENS", "")
+        tokens = [t.strip() for t in tokens_str.split(",")] if tokens_str else []
+
         # Split multiple server addresses by comma
-        for server_str in comfy_servers.split(","):
+        for i, server_str in enumerate(comfy_servers.split(",")):
             server_str = server_str.strip()
             if not server_str:
                 continue
@@ -29,7 +34,13 @@ def _parse_env_servers(comfy_servers: str) -> List[Dict[str, str]]:
                 host = server_str
                 port = "8188"  # Default port
 
-            servers.append({"host": host, "port": port})
+            server_config = {"host": host, "port": port}
+
+            # Add token if available for this server
+            if i < len(tokens) and tokens[i]:
+                server_config["token"] = tokens[i]
+
+            servers.append(server_config)
 
         return servers
 

@@ -223,6 +223,7 @@ class VideoVerifier:
                 output_info,
                 f"http://{server_info['host']}:{server_info['port']}",
                 out_dir,
+                token=server_info.get("token"),
             )
 
             if not downloaded_files:
@@ -387,9 +388,7 @@ class VideoVerifier:
             file_scores = {}
 
             # Calculate overall speed score once (not per file)
-            overall_speed_score = self._calculate_speed_score(
-                validator_execution_time, completion_time
-            )
+            overall_speed_score = self._calculate_speed_score(completion_time)
 
             # Compare each key (node_id_output_type)
             for key in set(
@@ -450,7 +449,6 @@ class VideoVerifier:
                 "speed_score": overall_speed_score,
                 "total_files_compared": total_files,
                 "file_scores": file_scores,
-                "validator_execution_time": validator_execution_time,
                 "completion_time": completion_time,
             }
 
@@ -541,29 +539,29 @@ class VideoVerifier:
             )
             return 0.0, {}
 
-    def _calculate_speed_score(self, validator_execution_time, completion_time):
+    def _calculate_speed_score(self, completion_time):
         """
-        Calculate speed score based on execution times
+        Calculate speed score based on verification time estimate
 
         Args:
-            validator_execution_time: Validator execution time
             completion_time: Task completion time
 
         Returns:
             float: Speed score between 0 and 1
         """
         try:
-            if not validator_execution_time or not completion_time:
-                return 0.5  # Default score if times not available
+            if not completion_time:
+                return 0.5
 
-            # Normalize speed score (faster is better)
-            # Assuming completion_time includes both validator and miner time
-            # We want to reward faster completion relative to validator time
-            speed_ratio = validator_execution_time / completion_time
+            baseline_speed = self.validator.validator_config.verification.get(
+                "verification_time_estimate", 300
+            )
 
-            # Clamp to reasonable range and normalize
-            speed_ratio = max(0.1, min(2.0, speed_ratio))
-            speed_score = speed_ratio / 2.0  # Normalize to 0-1 range
+            if completion_time <= baseline_speed:
+                return 1.0
+
+            excess_time = completion_time - baseline_speed
+            speed_score = max(0.0, 1.0 - (excess_time / baseline_speed))
 
             return speed_score
 
@@ -827,8 +825,23 @@ class VideoVerifier:
             validator_audio_path = validator_video_path.replace(".mp4", ".wav")
             miner_audio_path = miner_video_path.replace(".mp4", ".wav")
 
-            copy_audio_wav(validator_video_path, validator_audio_path)
-            copy_audio_wav(miner_video_path, miner_audio_path)
+            validator_has_audio = copy_audio_wav(
+                validator_video_path, validator_audio_path
+            )
+            miner_has_audio = copy_audio_wav(miner_video_path, miner_audio_path)
+
+            if validator_has_audio and not miner_has_audio:
+                metrics = {
+                    "error": "Validator has audio but miner doesn't",
+                    "final_score": 0.0,
+                }
+                return 0.0, metrics
+
+            # Use validator_has_audio as benchmark
+            if not validator_has_audio:
+                bt.logging.info(
+                    f"Validator video has no audio track. Audio similarity will be set to 1.0 (full score)."
+                )
 
             # Set clip parameters
             clip_duration = 2
@@ -842,13 +855,15 @@ class VideoVerifier:
                     clip_duration=clip_duration,
                     clips_per_video=clips_per_video,
                 ),
-                ModalityType.AUDIO: data.load_and_transform_audio_data(
+            }
+
+            if validator_has_audio:
+                inputs[ModalityType.AUDIO] = data.load_and_transform_audio_data(
                     [validator_audio_path, miner_audio_path],
                     self.device,
                     clip_duration=clip_duration,
                     clips_per_video=clips_per_video,
-                ),
-            }
+                )
 
             with torch.no_grad():
                 embeddings = self.model(inputs)
@@ -862,23 +877,30 @@ class VideoVerifier:
                 validator_video_embedding, miner_video_embedding, dim=1
             ).item()
 
-            # Get audio embeddings
-            validator_audio_embedding = embeddings[ModalityType.AUDIO][0:1]
-            miner_audio_embedding = embeddings[ModalityType.AUDIO][1:2]
-
-            # Calculate audio cosine similarity
-            audio_cos_sim = F.cosine_similarity(
-                validator_audio_embedding, miner_audio_embedding, dim=1
-            ).item()
-
-            # Calculate L2 distances
+            # Calculate L2 distance for video
             video_l2_distance = torch.norm(
                 validator_video_embedding - miner_video_embedding, p=2, dim=1
             ).item()
 
-            audio_l2_distance = torch.norm(
-                validator_audio_embedding - miner_audio_embedding, p=2, dim=1
-            ).item()
+            # Calculate audio similarity based on validator_has_audio
+            if validator_has_audio:
+                # Get audio embeddings
+                validator_audio_embedding = embeddings[ModalityType.AUDIO][0:1]
+                miner_audio_embedding = embeddings[ModalityType.AUDIO][1:2]
+
+                # Calculate audio cosine similarity
+                audio_cos_sim = F.cosine_similarity(
+                    validator_audio_embedding, miner_audio_embedding, dim=1
+                ).item()
+
+                # Calculate L2 distance for audio
+                audio_l2_distance = torch.norm(
+                    validator_audio_embedding - miner_audio_embedding, p=2, dim=1
+                ).item()
+            else:
+                # Validator has no audio: set audio similarity to 1.0 (full score)
+                audio_cos_sim = 1.0
+                audio_l2_distance = 0.0
 
             # Calculate metrics
             metrics = {

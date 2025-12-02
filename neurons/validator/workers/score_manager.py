@@ -111,6 +111,9 @@ class MinerScoreManager:
         # Miner task scores
         self.task_scores = {}  # {uid: [score1, score2, ...]}
 
+        self.global_verification_errors = 0
+        self.FAILURE_THRESHOLD = 3
+
         self.upldate_miner_state()
 
         bt.logging.info("Miner score manager initialization complete")
@@ -639,3 +642,20 @@ class MinerScoreManager:
         )
 
         return (history_count, current_count)
+
+    def record_verification_error(self):
+        """Record a global verification error (not per miner)"""
+        self.global_verification_errors += 1
+
+    def record_verification_success(self):
+        """Reset global verification error count on success"""
+        if self.global_verification_errors > 0:
+            self.global_verification_errors = 0
+
+    def should_use_consensus_only(self):
+        """Check if should use consensus score only for all miners
+
+        Returns:
+            bool: True if should use consensus only (ComfyUI unavailable or too many errors)
+        """
+        return self.global_verification_errors >= self.FAILURE_THRESHOLD

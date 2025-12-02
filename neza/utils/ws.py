@@ -19,6 +19,7 @@ class WebSocketManager:
         client_id: str,
         on_message_callback: Callable,
         on_status_change_callback: Callable = None,
+        headers: Dict[str, str] = None,
     ):
         """
         Initialize WebSocket manager
@@ -31,6 +32,7 @@ class WebSocketManager:
             client_id: Client identifier
             on_message_callback: Callback for handling messages
             on_status_change_callback: Callback for connection status changes
+            headers: Optional headers for WebSocket connection
         """
         self.server_id = server_id
         self.host = host
@@ -38,6 +40,7 @@ class WebSocketManager:
         self.client_id = client_id
         self.on_message_callback = on_message_callback
         self.on_status_change_callback = on_status_change_callback
+        self.headers = headers or {}
 
         self.ws = None
         self.ws_url = ws_url
@@ -68,6 +71,7 @@ class WebSocketManager:
 
             self.ws = websocket.WebSocketApp(
                 self.ws_url,
+                header=self.headers,
                 on_open=self._on_open,
                 on_message=self._on_message,
                 on_error=self._on_error,
