@@ -419,8 +419,8 @@ class TaskManager:
                 bt.logging.debug("No tasks available from online API")
                 return 0
 
-            # Calculate actual task count as minimum of online tasks and request count
-            actual_task_count = min(online_task_count, request_count)
+            # Calculate actual task count as maximum of online tasks and request count
+            actual_task_count = max(online_task_count, request_count)
             bt.logging.info(
                 f"Task count calculation: comfy_servers={comfy_server_count}, local_capacity={available_count}, generate_max_tasks={generate_max_tasks}, request_count={request_count}, online={online_task_count}, actual={actual_task_count}"
             )
