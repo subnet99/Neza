@@ -439,6 +439,10 @@ class VideoVerifier:
                 total_quality_score / total_files if total_files > 0 else 0.0
             )
 
+            # If quality score is less than 0.9, set speed score to 0
+            if avg_quality_score < 0.9:
+                overall_speed_score = 0.0
+
             # Final score: quality * 0.6 + speed * 0.4
             final_score = avg_quality_score * 0.6 + overall_speed_score * 0.4
 
@@ -526,9 +530,9 @@ class VideoVerifier:
                 )
 
             else:
-                # Other file types get fixed score of 0.5
-                bt.logging.info(f"Using fixed score 0.5 for file type: {file_type}")
-                quality_score = 0.5
+                # Other file types get fixed score of 0.9
+                bt.logging.info(f"Using fixed score 0.9 for file type: {file_type}")
+                quality_score = 0.9
                 metrics = {}
 
             return quality_score, metrics
