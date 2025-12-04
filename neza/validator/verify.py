@@ -439,12 +439,29 @@ class VideoVerifier:
                 total_quality_score / total_files if total_files > 0 else 0.0
             )
 
-            # If quality score is less than 0.9, set speed score to 0
-            if avg_quality_score < 0.9:
-                overall_speed_score = 0.0
+            # Get score weights and thresholds from config
+            quality_score_weight = self.validator.validator_config.verification.get(
+                "quality_score_weight", 0.6
+            )
+            speed_score_weight = self.validator.validator_config.verification.get(
+                "speed_score_weight", 0.4
+            )
+            quality_threshold = self.validator.validator_config.verification.get(
+                "quality_threshold", 0.9
+            )
+            low_quality_speed_score = self.validator.validator_config.verification.get(
+                "low_quality_speed_score", 0.2
+            )
 
-            # Final score: quality * 0.6 + speed * 0.4
-            final_score = avg_quality_score * 0.6 + overall_speed_score * 0.4
+            # If quality score is below threshold, set speed score to low value
+            if avg_quality_score < quality_threshold:
+                overall_speed_score = low_quality_speed_score
+
+            # Final score: quality * weight + speed * weight
+            final_score = (
+                avg_quality_score * quality_score_weight
+                + overall_speed_score * speed_score_weight
+            )
 
             # Build metrics
             metrics = {

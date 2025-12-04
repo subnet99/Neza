@@ -56,6 +56,10 @@ class ValidatorConfig:
             "verification_cycle_length": 21600,  # Verification cycle length in seconds (6 h)
             "min_verification_per_cycle": 1,  # Minimum verifications per miner per cycle
             "verification_time_estimate": 300,  # Estimated verification time (5 minutes)
+            "quality_score_weight": 0.6,  # Weight for quality score in final score calculation
+            "speed_score_weight": 0.4,  # Weight for speed score in final score calculation
+            "quality_threshold": 0.9,  # Quality threshold below which speed score is penalized
+            "low_quality_speed_score": 0.2,  # Speed score when quality is below threshold
         }
 
         # Miner penalty configuration
