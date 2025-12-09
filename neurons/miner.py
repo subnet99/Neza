@@ -636,10 +636,12 @@ class VideoMiner(BaseMinerNeuron):
 
                     for model_name in model_names:
                         if model_name in api_models:
-                            bt.logging.warning(
-                                f"Duplicate model name '{model_name}', overwriting previous keys"
-                            )
-                        api_models[model_name] = keys
+                            existing_keys = api_models[model_name]
+                            for key in keys:
+                                if key not in existing_keys:
+                                    existing_keys.append(key)
+                        else:
+                            api_models[model_name] = keys.copy()
 
                 if api_models:
                     bt.logging.info(f"Loaded {len(api_models)} models from API_MODELS")
