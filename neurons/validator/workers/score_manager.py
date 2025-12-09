@@ -381,7 +381,7 @@ class MinerScoreManager:
 
         if len(valid_scores) == 1:
             return {
-                uid: 0.5 if score is not None and score > 0 else 0.0
+                uid: 1.0 if score is not None and score > 0 else 0.0
                 for uid, score in api_avg_scores.items()
             }
 
@@ -569,19 +569,23 @@ class MinerScoreManager:
                 history_avg = self.safe_mean_score(self.historical_scores[uid])
 
             task_avg = 0
-            if uid in self.task_scores and self.task_scores[uid]:
+            has_task_scores = uid in self.task_scores and self.task_scores[uid]
+            if has_task_scores:
                 task_avg = self.safe_mean_score(self.task_scores[uid])
 
             api_avg = normalized_api_scores.get(uid, 0.0)
+            has_api_scores = uid in self.api_scores and self.api_scores[uid]
 
-            combined_score = (task_avg * self.score_config["comfy_task_weight"]) + (
-                api_avg * self.score_config["api_task_weight"]
-            )
+            if has_task_scores or has_api_scores:
+                combined_score = (task_avg * self.score_config["comfy_task_weight"]) + (
+                    api_avg * self.score_config["api_task_weight"]
+                )
 
-            # Push combined_score to current_scores for finalize_epoch
-            if uid not in self.current_scores:
-                self.current_scores[uid] = []
-            self.current_scores[uid].append(combined_score)
+                if uid not in self.current_scores:
+                    self.current_scores[uid] = []
+                self.current_scores[uid].append(combined_score)
+            else:
+                combined_score = 0
 
             history_component = history_avg * self.score_config["history_weight"]
             current_component = combined_score * self.score_config["current_weight"]
@@ -863,6 +867,9 @@ class MinerScoreManager:
                         miner_total_score += model_score * model_weight
 
                 self.record_score(hotkey, "api_task", miner_total_score)
+
+            if hasattr(self.validator, "task_manager"):
+                self.validator.task_manager.refresh_api_candidate_cache()
 
         except Exception as e:
             bt.logging.error(f"Error processing API scoring: {str(e)}")
