@@ -304,11 +304,6 @@ class MinerScoreManager:
             score: Score value
             is_api: Whether this is an API task score
         """
-        # Add to current cycle total scores
-        if uid not in self.current_scores:
-            self.current_scores[uid] = []
-        self.current_scores[uid].append(score)
-
         if is_api:
             if uid not in self.api_scores:
                 self.api_scores[uid] = []
@@ -417,32 +412,14 @@ class MinerScoreManager:
         return normalized
 
     def finalize_epoch(self):
-        """Complete current cycle, calculate average score and add to historical records"""
-        all_uids = (
-            set(self.current_scores.keys())
-            | set(self.task_scores.keys())
-            | set(self.api_scores.keys())
-        )
-
-        api_avg_scores = {}
-        for uid in all_uids:
-            api_avg = 0
-            if uid in self.api_scores and self.api_scores[uid]:
-                api_avg = self.safe_mean_score(self.api_scores[uid])
-            api_avg_scores[uid] = api_avg
-
-        normalized_api_scores = self.normalize_api_scores(api_avg_scores)
+        """Complete current cycle, calculate average score from current_scores and add to historical records"""
+        all_uids = set(self.current_scores.keys())
 
         for uid in all_uids:
-            task_avg = 0
-            if uid in self.task_scores and self.task_scores[uid]:
-                task_avg = self.safe_mean_score(self.task_scores[uid])
-
-            api_avg = normalized_api_scores.get(uid, 0.0)
-
-            epoch_score = (task_avg * self.score_config["comfy_task_weight"]) + (
-                api_avg * self.score_config["api_task_weight"]
-            )
+            # Calculate average from current_scores (which contains combined_score values)
+            epoch_score = 0
+            if uid in self.current_scores and self.current_scores[uid]:
+                epoch_score = self.safe_mean_score(self.current_scores[uid])
 
             # Add average score to historical records
             if uid not in self.historical_scores:
@@ -456,11 +433,11 @@ class MinerScoreManager:
                     -self.score_config["max_history"] :
                 ]
 
-            # Use the average score as the initial score for the next cycle
+            # Use the average score as the initial value for the next cycle
             self.current_scores[uid] = [epoch_score]
 
             bt.logging.debug(
-                f"UID {uid}: Calculated epoch score {epoch_score:.4f} (Comfy: {task_avg:.4f}, API: {api_avg:.4f}) added to history"
+                f"UID {uid}: Calculated epoch score {epoch_score:.4f} from {len(self.current_scores[uid])} current_scores, added to history"
             )
 
         # Limit task scores
@@ -600,6 +577,11 @@ class MinerScoreManager:
             combined_score = (task_avg * self.score_config["comfy_task_weight"]) + (
                 api_avg * self.score_config["api_task_weight"]
             )
+
+            # Push combined_score to current_scores for finalize_epoch
+            if uid not in self.current_scores:
+                self.current_scores[uid] = []
+            self.current_scores[uid].append(combined_score)
 
             history_component = history_avg * self.score_config["history_weight"]
             current_component = combined_score * self.score_config["current_weight"]

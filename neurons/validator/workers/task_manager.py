@@ -1651,36 +1651,66 @@ class TaskManager:
             if not request_id or not model:
                 return {}
 
+            bt.logging.info(
+                f"Received API task request: {request_id} for model {model}"
+            )
+
+            # Get API miners
             api_miners = self.validator.miner_manager.api_miners_cache
             if not api_miners:
                 bt.logging.warning("No API miners available")
                 return {}
 
+            # Get hotkeys for the requested model
             candidates = api_miners.get(model, [])
 
             if not candidates:
                 bt.logging.warning(f"No candidates for model {model}")
                 return {}
 
-            candidate_scores = {}
+            # Weighted selection based on normalized score
+            # 1. Get scores for all candidates and calculate average scores
             api_scores = self.validator.score_manager.api_scores
             hotkey_to_uid = self.validator.miner_manager.hotkey_to_uid
+            api_avg_scores = {}
 
             for hotkey in candidates:
                 uid = hotkey_to_uid.get(hotkey)
                 if uid is not None and uid in api_scores and api_scores[uid]:
+                    # Calculate average API score for this miner
                     avg_score = self.validator.score_manager.safe_mean_score(
                         api_scores[uid]
                     )
-                    candidate_scores[hotkey] = avg_score
+                    api_avg_scores[uid] = avg_score
+                else:
+                    # New miner or no score yet -> use 0 as placeholder (will be normalized)
+                    if uid is not None:
+                        api_avg_scores[uid] = 0.0
+
+            # 2. Normalize API scores to 0-1 range (consistent with finalize_epoch)
+            normalized_api_scores = self.validator.score_manager.normalize_api_scores(
+                api_avg_scores
+            )
+
+            # 3. Map normalized scores back to hotkeys
+            candidate_scores = {}
+            for hotkey in candidates:
+                uid = hotkey_to_uid.get(hotkey)
+                if uid is not None and uid in normalized_api_scores:
+                    normalized_score = normalized_api_scores[uid]
+                    candidate_scores[hotkey] = (
+                        normalized_score if normalized_score > 0 else 1.0
+                    )
                 else:
                     candidate_scores[hotkey] = 1.0
 
+            # 4. Calculate average score of candidates
             if candidate_scores:
                 avg_threshold = sum(candidate_scores.values()) / len(candidate_scores)
             else:
                 avg_threshold = 0
 
+            # 5. Filter candidates above average
             final_candidates = {
                 k: v for k, v in candidate_scores.items() if v >= avg_threshold
             }
@@ -1688,6 +1718,7 @@ class TaskManager:
             if not final_candidates:
                 final_candidates = candidate_scores
 
+            # 6. Weighted selection
             keys = list(final_candidates.keys())
             weights = list(final_candidates.values())
 
