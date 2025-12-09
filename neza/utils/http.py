@@ -1025,3 +1025,55 @@ async def get_online_task_count(validator_wallet, count=1):
         bt.logging.error(f"Error getting task count from online API: {str(e)}")
         bt.logging.error(traceback.format_exc())
         return 0, []
+
+
+async def register_miner_api_keys(miner_wallet, models_dict):
+    """
+    Register miner API keys with Owner
+
+    Args:
+        miner_wallet: Miner wallet
+        models_dict: Dictionary of {model_name: [key1, key2]}
+    """
+    try:
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            bt.logging.error("OWNER_HOST environment variable not set")
+            return False
+
+        timestamp = int(time.time())
+
+        body = {
+            "miner_hotkey": miner_wallet.hotkey.ss58_address,
+            "timestamp": timestamp,
+            **models_dict,
+        }
+
+        # Generate signature
+        exclude_fields = ["miner_signature"]
+        message = generate_signature_message(body, exclude_fields)
+        signature = miner_wallet.hotkey.sign(message.encode()).hex()
+        body["miner_signature"] = signature
+
+        api_url = f"{owner_host}/v2/miner/register"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        bt.logging.info(f"Registering API keys: {body}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=body, headers=headers, timeout=30
+            ) as response:
+                if response.status == 200:
+                    bt.logging.info("Successfully registered API keys")
+                    return True
+                else:
+                    error_text = await response.text()
+                    bt.logging.error(
+                        f"Failed to register API keys: {response.status}, {error_text}"
+                    )
+                    return False
+
+    except Exception as e:
+        bt.logging.error(f"Error registering API keys: {str(e)}")
+        return False

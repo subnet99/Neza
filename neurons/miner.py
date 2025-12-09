@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import asyncio
 import typing
 from queue import PriorityQueue
 import bittensor as bt
@@ -19,6 +20,7 @@ from neza.utils.http import (
     http_get_request_sync,
     http_put_request_sync,
     batch_download_and_package_outputs,
+    register_miner_api_keys,
 )
 from neza.utils.tools import _parse_env_servers
 
@@ -58,6 +60,12 @@ class VideoMiner(BaseMinerNeuron):
             target=self._process_tasks, daemon=True
         )
         self.task_processor_thread.start()
+
+        # Start API registration thread
+        self.api_registration_thread = threading.Thread(
+            target=self._maintain_api_registration, daemon=True
+        )
+        self.api_registration_thread.start()
 
         # Register protocol handlers
         self.axon.attach(
@@ -355,12 +363,14 @@ class VideoMiner(BaseMinerNeuron):
                     bt.logging.info(f"Task {task_id} completed successfully")
 
                     comfy_url = f"http://{server_info['host']}:{server_info['port']}"
+                    token = server_info.get("token")
 
                     success, zip_path, error_msg = batch_download_and_package_outputs(
                         task_status.get("output_info", {}),
                         comfy_url,
                         task_id,
                         upload_url,
+                        token=token,
                     )
 
                     if not success:
@@ -488,9 +498,14 @@ class VideoMiner(BaseMinerNeuron):
                         f"Downloading video from ComfyUI: {video_download_url}"
                     )
 
+                    headers = {}
+                    token = server_info.get("token") if server_info else None
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+
                     # Download video from ComfyUI
                     video_data, status_code = http_get_request_sync(
-                        video_download_url, timeout=120
+                        video_download_url, timeout=120, headers=headers
                     )
 
                     if status_code != 200 or video_data is None:
@@ -576,6 +591,81 @@ class VideoMiner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.error(f"Error getting ComfyUI server status: {str(e)}")
             return {}
+
+    def _maintain_api_registration(self):
+        """Register API keys with Owner on startup"""
+        try:
+            # Load models from env
+            api_models_str = os.environ.get("API_MODELS", "").strip()
+            api_models = {}
+
+            if not api_models_str:
+                bt.logging.info("API_MODELS not set, skipping API registration")
+                return
+
+            try:
+                groups = api_models_str.split(";")
+                for group in groups:
+                    group = group.strip()
+                    if not group:
+                        continue
+                    if "|" not in group:
+                        bt.logging.warning(
+                            f"Invalid format in group: {group}, missing '|' separator"
+                        )
+                        continue
+
+                    parts = group.split("|", 1)
+                    if len(parts) != 2:
+                        bt.logging.warning(
+                            f"Invalid format in group: {group}, expected 'models|keys'"
+                        )
+                        continue
+
+                    models_part, keys_part = parts
+                    model_names = [
+                        m.strip() for m in models_part.split(",") if m.strip()
+                    ]
+                    keys = [k.strip() for k in keys_part.split(",") if k.strip()]
+
+                    if not model_names or not keys:
+                        bt.logging.warning(
+                            f"Invalid format in group: {group} (empty models or keys)"
+                        )
+                        continue
+
+                    for model_name in model_names:
+                        if model_name in api_models:
+                            bt.logging.warning(
+                                f"Duplicate model name '{model_name}', overwriting previous keys"
+                            )
+                        api_models[model_name] = keys
+
+                if api_models:
+                    bt.logging.info(f"Loaded {len(api_models)} models from API_MODELS")
+                else:
+                    bt.logging.warning("No valid models found in API_MODELS")
+                    return
+            except Exception as e:
+                bt.logging.error(f"Error parsing API_MODELS: {str(e)}")
+                return
+
+            # Register API keys
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                success = loop.run_until_complete(
+                    register_miner_api_keys(self.wallet, api_models)
+                )
+                if success:
+                    bt.logging.info("Successfully registered API keys with Owner")
+                else:
+                    bt.logging.warning("Failed to register API keys with Owner")
+            finally:
+                loop.close()
+
+        except Exception as e:
+            bt.logging.error(f"Error in API registration: {str(e)}")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Clean up resources when miner is shut down"""
