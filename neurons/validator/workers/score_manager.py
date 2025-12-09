@@ -10,8 +10,9 @@ import traceback
 import bittensor as bt
 import torch
 import numpy as np
+import math
 from typing import Dict, List, Optional, Any, Tuple
-from neza.utils.http import upload_cache_file_sync
+from neza.utils.http import upload_cache_file_sync, get_api_miner_stats
 
 
 class MinerScoreManager:
@@ -27,6 +28,7 @@ class MinerScoreManager:
     DEFAULT_CURRENT_WEIGHT = 0.7
     DEFAULT_MAX_HISTORY = 10
     DEFAULT_SLIDING_WINDOW = 30
+    DEFAULT_ALWAYS_SAVE_CACHE = True
     DEFAULT_CACHE_FILE = ".score/score_cache.json"
 
     # Sigmoid function parameters
@@ -37,6 +39,14 @@ class MinerScoreManager:
     MIN_SCORE_FACTOR = 0.9
     LOW_SCORE_THRESHOLD = 1.1
     BASE_SCORE = 0.05
+
+    # Default weights
+    DEFAULT_COMFY_TASK_WEIGHT = 0.2
+    DEFAULT_API_TASK_WEIGHT = 0.8
+
+    DEFAULT_EMISSION_MIN = 0.2
+    DEFAULT_EMISSION_MAX = 1.0
+    DEFAULT_EMISSION_MAX_PRO = 1.0
 
     def __init__(self, config, validator):
         """Initialize score manager
@@ -53,52 +63,6 @@ class MinerScoreManager:
         self.cache_file = os.path.join(project_root, self.DEFAULT_CACHE_FILE)
         bt.logging.info(f"Cache file path: {self.cache_file}")
 
-        # Configuration parameters
-        # Fix configuration retrieval method, ensure cache_version is set correctly
-        if hasattr(config, "score_manager") and config.score_manager is not None:
-            self.cache_version = getattr(
-                config.score_manager, "cache_version", self.DEFAULT_CACHE_VERSION
-            )
-            self.min_cache_version = getattr(
-                config.score_manager,
-                "min_cache_version",
-                self.DEFAULT_MIN_CACHE_VERSION,
-            )
-            self.history_weight = getattr(
-                config.score_manager, "history_weight", self.DEFAULT_HISTORY_WEIGHT
-            )
-            self.current_weight = getattr(
-                config.score_manager, "current_weight", self.DEFAULT_CURRENT_WEIGHT
-            )
-            self.max_history = getattr(
-                config.score_manager, "max_history", self.DEFAULT_MAX_HISTORY
-            )
-            self.sliding_window = getattr(
-                config.score_manager, "sliding_window", self.DEFAULT_SLIDING_WINDOW
-            )
-
-            # Get configuration for whether to save cache every time
-            self.always_save_cache = getattr(
-                config.score_manager, "always_save_cache", True
-            )
-
-            bt.logging.info(
-                f"Using custom score_manager configuration: cache_version={self.cache_version}"
-            )
-        else:
-            # Use default values
-            self.cache_version = self.DEFAULT_CACHE_VERSION
-            self.min_cache_version = self.DEFAULT_MIN_CACHE_VERSION
-            self.history_weight = self.DEFAULT_HISTORY_WEIGHT
-            self.current_weight = self.DEFAULT_CURRENT_WEIGHT
-            self.max_history = self.DEFAULT_MAX_HISTORY
-            self.sliding_window = self.DEFAULT_SLIDING_WINDOW
-            self.always_save_cache = True
-
-            bt.logging.info(
-                f"Using default score_manager configuration: cache_version={self.cache_version}"
-            )
-
         self.validator = validator
         # Current cycle score records
         self.current_scores = {}  # {uid: [score1, score2, ...]}
@@ -110,6 +74,7 @@ class MinerScoreManager:
 
         # Miner task scores
         self.task_scores = {}  # {uid: [score1, score2, ...]}
+        self.api_scores = {}  # {uid: [score1, score2, ...]}
 
         self.global_verification_errors = 0
         self.FAILURE_THRESHOLD = 3
@@ -117,6 +82,36 @@ class MinerScoreManager:
         self.upldate_miner_state()
 
         bt.logging.info("Miner score manager initialization complete")
+
+    @property
+    def score_config(self):
+        if (
+            hasattr(self.config, "score_manager")
+            and self.config.score_manager is not None
+        ):
+            return self.config.score_manager
+        return {
+            "emission_min": 0.3,
+            "emission_max": 1.0,
+            "emission_max_pro": 1.0,
+            "emission_k1": 3.0,
+            "emission_k2": 0.5,
+            "emission_transition": 0.5,
+            "miner_factor_min": 0.2,
+            "miner_factor_max": 2.5,
+            "miner_factor_k1": 4.0,
+            "miner_factor_k2": 1.0,
+            "miner_factor_transition": 0.5,
+            "comfy_task_weight": self.DEFAULT_COMFY_TASK_WEIGHT,
+            "api_task_weight": self.DEFAULT_API_TASK_WEIGHT,
+            "history_weight": self.DEFAULT_HISTORY_WEIGHT,
+            "current_weight": self.DEFAULT_CURRENT_WEIGHT,
+            "max_history": self.DEFAULT_MAX_HISTORY,
+            "sliding_window": self.DEFAULT_SLIDING_WINDOW,
+            "always_save_cache": self.DEFAULT_ALWAYS_SAVE_CACHE,
+            "min_cache_version": self.DEFAULT_MIN_CACHE_VERSION,
+            "cache_version": self.DEFAULT_CACHE_VERSION,
+        }
 
     def initialize(self):
         """Initialize score manager and load cache
@@ -151,9 +146,9 @@ class MinerScoreManager:
                 data = json.load(file)
 
                 # Verify version compatibility
-                if data.get("version", 0) < self.min_cache_version:
+                if data.get("version", 0) < self.score_config["min_cache_version"]:
                     bt.logging.warning(
-                        f"Cache file version too low ({data.get('version', 0)} < {self.min_cache_version}), not loading"
+                        f"Cache file version too low ({data.get('version', 0)} < {self.score_config['min_cache_version']}), not loading"
                     )
                     return
 
@@ -179,6 +174,10 @@ class MinerScoreManager:
                     self.task_scores = {
                         int(k): v for k, v in data["synthetic_scores"].items()
                     }
+
+                # Load API scores
+                if "api_scores" in data:
+                    self.api_scores = {int(k): v for k, v in data["api_scores"].items()}
 
                 # Load hotkey mapping
                 if "miner_hotkeys" in data:
@@ -248,6 +247,8 @@ class MinerScoreManager:
             del self.current_scores[uid]
         if uid in self.task_scores:
             del self.task_scores[uid]
+        if uid in self.api_scores:
+            del self.api_scores[uid]
 
     def record_score(self, hotkey, task_id, score):
         """Record the score, convert the hotkey to UID, and call add_score.
@@ -259,13 +260,16 @@ class MinerScoreManager:
         """
         # Find UID through hotkey
         uid = self.hotkey_to_uid.get(hotkey)
+
+        is_api = task_id == "api_task"
+
         if uid is not None:
             score_str = f"{score:.4f}" if score is not None else "None"
             bt.logging.debug(
                 f"Recording score {score_str} for hotkey: {hotkey[:10]}... Task {task_id} UID: {uid}"
             )
 
-            self.add_score(uid, score)
+            self.add_score(uid, score, is_api)
             # Cache is automatically saved by add_score when always_save_cache is True
         else:
             bt.logging.warning(
@@ -284,7 +288,7 @@ class MinerScoreManager:
                     bt.logging.info(
                         f"Adding score {score_str} for UID {uid} after fixing mapping"
                     )
-                    self.add_score(uid, score)
+                    self.add_score(uid, score, is_api)
                     # Cache is automatically saved by add_score when always_save_cache is True
                     return
 
@@ -292,27 +296,30 @@ class MinerScoreManager:
                 f"Could not find matching UID for hotkey {hotkey} in any mapping"
             )
 
-    def add_score(self, uid, score=0.0):
+    def add_score(self, uid, score=0.0, is_api=False):
         """Add score to current cycle score records
 
         Args:
             uid: Miner UID
             score: Score value
+            is_api: Whether this is an API task score
         """
         # Add to current cycle total scores
         if uid not in self.current_scores:
             self.current_scores[uid] = []
-
         self.current_scores[uid].append(score)
 
-        # Add to task scores
-        if uid not in self.task_scores:
-            self.task_scores[uid] = []
-
-        self.task_scores[uid].append(score)
+        if is_api:
+            if uid not in self.api_scores:
+                self.api_scores[uid] = []
+            self.api_scores[uid].append(score)
+        else:
+            if uid not in self.task_scores:
+                self.task_scores[uid] = []
+            self.task_scores[uid].append(score)
 
         # If configured to save cache every time, save
-        if hasattr(self, "always_save_cache") and self.always_save_cache:
+        if self.score_config["always_save_cache"]:
             self.save_cache()
 
     def safe_mean_score(self, data):
@@ -355,38 +362,119 @@ class MinerScoreManager:
         """
         return 1 / (1 + np.exp(-self.SIGMOID_STEEPNESS * (x - self.SIGMOID_MIDPOINT)))
 
+    def normalize_api_scores(self, api_avg_scores):
+        """Normalize API scores to 0-1 range using percentile-based normalization
+        This is more robust to outliers than min-max normalization
+
+        Args:
+            api_avg_scores: Dict of {uid: api_avg_score}
+
+        Returns:
+            Dict of {uid: normalized_score} in 0-1 range
+        """
+        if not api_avg_scores:
+            return {}
+
+        valid_scores = [
+            score
+            for score in api_avg_scores.values()
+            if score is not None and score > 0
+        ]
+
+        if not valid_scores:
+            return {uid: 0.0 for uid in api_avg_scores.keys()}
+
+        if len(valid_scores) == 1:
+            return {
+                uid: 0.5 if score is not None and score > 0 else 0.0
+                for uid, score in api_avg_scores.items()
+            }
+
+        sorted_scores = sorted(valid_scores)
+        n = len(sorted_scores)
+
+        p5_idx = max(0, int(n * 0.05))  # 5th percentile index
+        p95_idx = min(n - 1, int(n * 0.95))  # 95th percentile index
+
+        min_score = sorted_scores[p5_idx]  # Use 5th percentile as min
+        max_score = sorted_scores[p95_idx]  # Use 95th percentile as max
+
+        if max_score == min_score:
+            return {
+                uid: 0.5 if score is not None and score > 0 else 0.0
+                for uid, score in api_avg_scores.items()
+            }
+
+        normalized = {}
+        for uid, score in api_avg_scores.items():
+            if score is None or score <= 0:
+                normalized[uid] = 0.0
+            else:
+                clamped_score = max(min_score, min(max_score, score))
+                normalized[uid] = (clamped_score - min_score) / (max_score - min_score)
+                normalized[uid] = max(0.0, min(1.0, normalized[uid]))
+
+        return normalized
+
     def finalize_epoch(self):
         """Complete current cycle, calculate average score and add to historical records"""
-        for uid, scores in self.current_scores.items():
-            if not scores:
-                continue
+        all_uids = (
+            set(self.current_scores.keys())
+            | set(self.task_scores.keys())
+            | set(self.api_scores.keys())
+        )
 
-            # Calculate average of all current scores
-            avg_score = self.safe_mean_score(scores)
+        api_avg_scores = {}
+        for uid in all_uids:
+            api_avg = 0
+            if uid in self.api_scores and self.api_scores[uid]:
+                api_avg = self.safe_mean_score(self.api_scores[uid])
+            api_avg_scores[uid] = api_avg
+
+        normalized_api_scores = self.normalize_api_scores(api_avg_scores)
+
+        for uid in all_uids:
+            task_avg = 0
+            if uid in self.task_scores and self.task_scores[uid]:
+                task_avg = self.safe_mean_score(self.task_scores[uid])
+
+            api_avg = normalized_api_scores.get(uid, 0.0)
+
+            epoch_score = (task_avg * self.score_config["comfy_task_weight"]) + (
+                api_avg * self.score_config["api_task_weight"]
+            )
 
             # Add average score to historical records
             if uid not in self.historical_scores:
                 self.historical_scores[uid] = []
 
-            self.historical_scores[uid].append(avg_score)
+            self.historical_scores[uid].append(epoch_score)
 
             # Limit historical records
-            if len(self.historical_scores[uid]) > self.max_history:
+            if len(self.historical_scores[uid]) > self.score_config["max_history"]:
                 self.historical_scores[uid] = self.historical_scores[uid][
-                    -self.max_history :
+                    -self.score_config["max_history"] :
                 ]
 
             # Use the average score as the initial score for the next cycle
-            self.current_scores[uid] = [avg_score]
+            self.current_scores[uid] = [epoch_score]
 
             bt.logging.debug(
-                f"UID {uid}: Calculated average score {avg_score:.4f} added to history and set as initial score for next cycle"
+                f"UID {uid}: Calculated epoch score {epoch_score:.4f} (Comfy: {task_avg:.4f}, API: {api_avg:.4f}) added to history"
             )
 
         # Limit task scores
         for uid in self.task_scores:
-            if len(self.task_scores[uid]) > self.sliding_window:
-                self.task_scores[uid] = self.task_scores[uid][-self.sliding_window :]
+            if len(self.task_scores[uid]) > self.score_config["sliding_window"]:
+                self.task_scores[uid] = self.task_scores[uid][
+                    -self.score_config["sliding_window"] :
+                ]
+
+        for uid in self.api_scores:
+            if len(self.api_scores[uid]) > self.score_config["sliding_window"]:
+                self.api_scores[uid] = self.api_scores[uid][
+                    -self.score_config["sliding_window"] :
+                ]
 
         bt.logging.info(
             f"Cycle complete, scores processed, {len(self.historical_scores)} miners in historical records"
@@ -395,6 +483,69 @@ class MinerScoreManager:
         # Save cache
         self.save_cache()
 
+    def calculate_emission_percentage(self, total_miner_stake, avg_validator_stake):
+        """Calculate emission percentage allocated to miners (segmented exponential model)"""
+        if avg_validator_stake == 0:
+            return self.score_config["emission_min"]
+
+        emission_min = self.score_config["emission_min"]
+        emission_max = self.score_config["emission_max"]
+        k1 = self.score_config["emission_k1"]
+        k2 = self.score_config["emission_k2"]
+        transition = self.score_config["emission_transition"]
+
+        ratio = total_miner_stake / avg_validator_stake
+
+        if ratio >= 1.0:
+            return emission_max
+
+        if ratio < transition:
+            normalized_ratio = ratio / transition
+            emission = emission_min + (emission_max - emission_min) * (
+                1 - math.exp(-k1 * normalized_ratio)
+            )
+        else:
+            transition_emission = emission_min + (emission_max - emission_min) * (
+                1 - math.exp(-k1)
+            )
+            normalized_ratio = (ratio - transition) / (1.0 - transition)
+            remaining_range = emission_max - transition_emission
+            emission = transition_emission + remaining_range * (
+                1 - math.exp(-k2 * normalized_ratio)
+            )
+
+        return min(emission_max, max(emission_min, emission))
+
+    def calculate_miner_factor(self, miner_stake, avg_miner_stake):
+        """Calculate score adjustment factor based on miner stake (segmented exponential model)"""
+        if avg_miner_stake == 0:
+            return 1.0
+
+        min_factor = self.score_config["miner_factor_min"]
+        max_factor = self.score_config["miner_factor_max"]
+        k1 = self.score_config["miner_factor_k1"]
+        k2 = self.score_config["miner_factor_k2"]
+        transition = self.score_config["miner_factor_transition"]
+
+        ratio = miner_stake / avg_miner_stake
+
+        if ratio < transition:
+            normalized_ratio = ratio / transition
+            factor = min_factor + (1.0 - min_factor) * (
+                1 - math.exp(-k1 * normalized_ratio)
+            )
+        else:
+            transition_factor = min_factor + (1.0 - min_factor) * (1 - math.exp(-k1))
+            max_ratio = 3.0
+            normalized_ratio = (ratio - transition) / (max_ratio - transition)
+            normalized_ratio = min(1.0, normalized_ratio)
+            remaining_range = max_factor - transition_factor
+            factor = transition_factor + remaining_range * (
+                1 - math.exp(-k2 * normalized_ratio)
+            )
+
+        return max(min_factor, min(max_factor, factor))
+
     def calculate_weights(self, active_uids=None):
         """Calculate final weight scores
 
@@ -402,43 +553,76 @@ class MinerScoreManager:
             active_uids: Optional, list of active miner UIDs, if provided calculate weights for these miners only
 
         Returns:
-            Dict[int, float]: UID to weight score mapping
+            tuple: (Dict[int, float], float) - (UID to weight score mapping, emission percentage)
         """
         weights = {}
+
+        stake_metrics = self.validator.miner_manager.get_stake_metrics()
+        avg_validator_stake = stake_metrics["avg_validator_stake"]
+        total_miner_stake = stake_metrics["total_miner_stake"]
+        avg_miner_stake = stake_metrics["avg_miner_stake"]
+        miner_stakes = stake_metrics["miner_stakes"]
+
+        emission_percentage = self.calculate_emission_percentage(
+            total_miner_stake, avg_validator_stake
+        )
+
+        bt.logging.info(
+            f"Stake Metrics: Avg Val Stake: {avg_validator_stake:.2f}, Total Miner Stake: {total_miner_stake:.2f}, Avg Miner Stake: {avg_miner_stake:.2f}"
+        )
+        bt.logging.info(f"Emission Percentage: {emission_percentage:.2f}")
 
         # Determine which UIDs to calculate
         uids_to_calculate = (
             active_uids if active_uids is not None else list(self.miner_hotkeys.keys())
         )
+
+        api_avg_scores = {}
+        for uid in uids_to_calculate:
+            api_avg = 0
+            if uid in self.api_scores and self.api_scores[uid]:
+                api_avg = self.safe_mean_score(self.api_scores[uid])
+            api_avg_scores[uid] = api_avg
+
+        normalized_api_scores = self.normalize_api_scores(api_avg_scores)
+
         for uid in uids_to_calculate:
             history_avg = 0
             if uid in self.historical_scores and self.historical_scores[uid]:
                 history_avg = self.safe_mean_score(self.historical_scores[uid])
 
-            # Calculate task average score
             task_avg = 0
-            task_count = 0
             if uid in self.task_scores and self.task_scores[uid]:
                 task_avg = self.safe_mean_score(self.task_scores[uid])
-                task_count = len(self.task_scores[uid])
 
-            # Calculate final score
-            if history_avg == 0 and task_avg == 0:
-                weights[uid] = 0
-            else:
+            api_avg = normalized_api_scores.get(uid, 0.0)
+
+            combined_score = (task_avg * self.score_config["comfy_task_weight"]) + (
+                api_avg * self.score_config["api_task_weight"]
+            )
+
+            history_component = history_avg * self.score_config["history_weight"]
+            current_component = combined_score * self.score_config["current_weight"]
+            base_weight = history_component + current_component
+
+            total_tasks = len(self.task_scores.get(uid, [])) + len(
+                self.api_scores.get(uid, [])
+            )
+            if total_tasks < 2:
+                base_weight *= 0.5
+
+            miner_stake = miner_stakes.get(uid, 0.0)
+            miner_factor = self.calculate_miner_factor(miner_stake, avg_miner_stake)
+
+            final_weight = base_weight * miner_factor
+            weights[uid] = final_weight
+
+            if base_weight > 0:
                 bt.logging.debug(
-                    f"UID {uid} - History: {history_avg:.4f}, Task: {task_avg:.4f}, Task Count: {task_count}"
+                    f"UID {uid} - Base: {base_weight:.4f}, Stake: {miner_stake:.2f}, Factor: {miner_factor:.2f}, Final: {final_weight:.4f}"
                 )
 
-            # Calculate weighted score - simplified condition check
-            history_component = history_avg * self.history_weight
-            current_component = task_avg * self.current_weight
-            weights[uid] = history_component + current_component
-
-            if task_count < 2:
-                weights[uid] *= 0.5
-
-        return weights
+        return weights, emission_percentage
 
     def normalize_weights(self, weights):
         """Normalize weight scores, use more complex normalization method
@@ -493,11 +677,7 @@ class MinerScoreManager:
             os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
 
             # Ensure version is not null
-            cache_version = (
-                self.cache_version
-                if hasattr(self, "cache_version") and self.cache_version is not None
-                else self.DEFAULT_CACHE_VERSION
-            )
+            cache_version = self.score_config["cache_version"]
 
             # Convert uid keys to strings for JSON serialization
             # Important: We need to preserve the real UIDs, not use indices
@@ -506,6 +686,7 @@ class MinerScoreManager:
             }
             updated_current_scores = {str(k): v for k, v in self.current_scores.items()}
             updated_task_scores = {str(k): v for k, v in self.task_scores.items()}
+            updated_api_scores = {str(k): v for k, v in self.api_scores.items()}
             updated_miner_hotkeys = {str(k): v for k, v in self.miner_hotkeys.items()}
 
             data = {
@@ -514,6 +695,7 @@ class MinerScoreManager:
                 "historical_scores": updated_historical_scores,
                 "current_scores": updated_current_scores,
                 "task_scores": updated_task_scores,
+                "api_scores": updated_api_scores,
                 "miner_hotkeys": updated_miner_hotkeys,
             }
 
@@ -614,6 +796,7 @@ class MinerScoreManager:
             count = len(self.current_scores)
             self.current_scores = {}
             self.task_scores = {}
+            self.api_scores = {}
             bt.logging.info(
                 f"Cleared all miners' current cycle score records, {count} records"
             )
@@ -659,3 +842,45 @@ class MinerScoreManager:
             bool: True if should use consensus only (ComfyUI unavailable or too many errors)
         """
         return self.global_verification_errors >= self.FAILURE_THRESHOLD
+
+    async def process_api_scoring(self):
+        """Process API miner scoring"""
+        try:
+            bt.logging.info("Processing API scoring")
+            stats = await get_api_miner_stats(self.validator.wallet)
+            if not stats:
+                return
+
+            model_ratios = stats.get("model_call_ratio", {})
+            miners_info = stats.get("miner_stats", {})
+
+            active_hotkeys = set()
+            api_miners_cache = self.validator.miner_manager.api_miners_cache
+            if api_miners_cache:
+                for model_name, hotkeys in api_miners_cache.items():
+                    active_hotkeys.update(hotkeys)
+
+            for uid, hotkey in self.miner_hotkeys.items():
+                if hotkey not in active_hotkeys and uid in self.api_scores:
+                    self.api_scores[uid] = [0.0]
+
+            for hotkey, models_data in miners_info.items():
+                if models_data is None:
+                    continue
+                miner_total_score = 0.0
+
+                for model_name, stat in models_data.items():
+                    model_weight = model_ratios.get(model_name, 0.0)
+                    call_count = stat.get("call_count", 0)
+                    success_count = stat.get("success_count", 0)
+                    total_cost = stat.get("total_cost", 0.0)
+
+                    if call_count > 0:
+                        success_rate = success_count / call_count
+                        model_score = total_cost * success_rate
+                        miner_total_score += model_score * model_weight
+
+                self.record_score(hotkey, "api_task", miner_total_score)
+
+        except Exception as e:
+            bt.logging.error(f"Error processing API scoring: {str(e)}")

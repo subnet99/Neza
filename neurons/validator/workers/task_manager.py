@@ -23,7 +23,10 @@ from neza.utils.http import (
     get_result_upload_urls,
     http_put_request_sync,
     request_upload_url,
+    request_upload_url,
+    request_upload_url,
     get_online_task_count,
+    listen_for_api_tasks,
 )
 from neurons.validator.tasks.task import Task
 from neurons.validator.tasks.task_database import TaskDatabase
@@ -97,12 +100,27 @@ class TaskManager:
             if self.validator.miner_info_cache is None:
                 bt.logging.warning("No miner data available, skipping task processing")
                 return
-            # Create a new thread to process tasks
             thread = threading.Thread(target=self._process_tasks_in_thread)
             thread.daemon = True
             thread.start()
+
         else:
             bt.logging.debug(f"Skipping task processing on block {block_number}")
+
+    def start_api_task_listener(self):
+        """Start API task listener"""
+        try:
+            if (
+                not hasattr(self, "api_task_thread")
+                or not self.api_task_thread.is_alive()
+            ):
+                self.api_task_thread = threading.Thread(
+                    target=self._start_api_task_listener, daemon=True
+                )
+                self.api_task_thread.start()
+        except Exception as e:
+            bt.logging.error(f"Error starting API task listener: {str(e)}")
+            bt.logging.error(traceback.format_exc())
 
     def _process_tasks_in_thread(self):
         """Process tasks in a separate thread"""
@@ -1609,3 +1627,78 @@ class TaskManager:
                 f"Error updating sended_miners for changed hotkey: {str(e)}"
             )
             bt.logging.error(traceback.format_exc())
+
+    def _start_api_task_listener(self):
+        """Start API task listener thread"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            loop.run_until_complete(
+                listen_for_api_tasks(self.validator.wallet, self._handle_api_task)
+            )
+        except Exception as e:
+            bt.logging.error(f"Error in API task listener thread: {str(e)}")
+        finally:
+            loop.close()
+
+    async def _handle_api_task(self, request):
+        """Handle incoming API task request"""
+        try:
+            request_id = request.get("request_id")
+            model = request.get("model_type")
+
+            if not request_id or not model:
+                return {}
+
+            api_miners = self.validator.miner_manager.api_miners_cache
+            if not api_miners:
+                bt.logging.warning("No API miners available")
+                return {}
+
+            candidates = api_miners.get(model, [])
+
+            if not candidates:
+                bt.logging.warning(f"No candidates for model {model}")
+                return {}
+
+            candidate_scores = {}
+            api_scores = self.validator.score_manager.api_scores
+            hotkey_to_uid = self.validator.miner_manager.hotkey_to_uid
+
+            for hotkey in candidates:
+                uid = hotkey_to_uid.get(hotkey)
+                if uid is not None and uid in api_scores and api_scores[uid]:
+                    avg_score = self.validator.score_manager.safe_mean_score(
+                        api_scores[uid]
+                    )
+                    candidate_scores[hotkey] = avg_score
+                else:
+                    candidate_scores[hotkey] = 1.0
+
+            if candidate_scores:
+                avg_threshold = sum(candidate_scores.values()) / len(candidate_scores)
+            else:
+                avg_threshold = 0
+
+            final_candidates = {
+                k: v for k, v in candidate_scores.items() if v >= avg_threshold
+            }
+
+            if not final_candidates:
+                final_candidates = candidate_scores
+
+            keys = list(final_candidates.keys())
+            weights = list(final_candidates.values())
+
+            selected_hotkey = random.choices(keys, weights=weights, k=1)[0]
+
+            bt.logging.info(
+                f"Assigned API task {request_id} to {selected_hotkey} (Score: {final_candidates[selected_hotkey]:.4f}, Threshold: {avg_threshold:.4f})"
+            )
+
+            return {"request_id": request_id, "miner_hotkey": selected_hotkey}
+
+        except Exception as e:
+            bt.logging.error(f"Error handling API task: {str(e)}")
+            return {}

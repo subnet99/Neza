@@ -78,6 +78,11 @@ cp env.example .env
 # Configure multiple ComfyUI servers if using distributed GPU setup
 # Format: IP1:PORT1,IP2:PORT2,IP3:PORT3
 COMFYUI_SERVERS=127.0.0.1:8188
+
+# API Models and Keys (for Miner)
+# Simple format: model1,model2|key1,key2;model3|key3
+# Example: sora-2,sora-2-pro|sk-xxx,key2;sora-2|sk-xxx2
+API_MODELS=
 ```
 
 ## Miner Startup Command

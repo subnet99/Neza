@@ -66,6 +66,9 @@ class VideoValidator(BaseValidatorNeuron):
         # Initialize miner info cache
         self.miner_info_cache = None
 
+        # calculated emission percentage
+        self._emission_percentage = None
+
         # Initialize wandb run
         self.wandb_run_start_time = None
         if not self.config.wandb.off:
@@ -108,6 +111,7 @@ class VideoValidator(BaseValidatorNeuron):
         Validator forward pass, handles task scheduling and monitoring
         """
         bt.logging.info("start forward")
+        self.task_manager.start_api_task_listener()
         await self.task_manager._check_active_tasks_optimized()
         await asyncio.sleep(30)
 
@@ -187,7 +191,9 @@ class VideoValidator(BaseValidatorNeuron):
                 return
 
             # Get current scores from score_manager (raw scores, not normalized)
-            weights = self.score_manager.calculate_weights(all_uids)
+            weights, emission_percentage = self.score_manager.calculate_weights(
+                all_uids
+            )
 
             # Create a new scores array
             new_scores = np.zeros(self.metagraph.n, dtype=np.float32)
@@ -199,6 +205,7 @@ class VideoValidator(BaseValidatorNeuron):
                     continue
                 new_scores[uid] = weights.get(uid, 0.0)
 
+            self._emission_percentage = emission_percentage
             # Update BaseValidatorNeuron's scores attribute
             self.scores = new_scores
 
@@ -293,35 +300,86 @@ class VideoValidator(BaseValidatorNeuron):
             bt.logging.error(f"Error processing changed UIDs: {str(e)}")
             bt.logging.error(traceback.format_exc())
 
+    @property
+    def effective_emission_control(self):
+        """Get effective emission control: use config if enabled, otherwise auto-enable burn logic based on calculated emission percentage"""
+        if self.validator_config.emission_control["enabled"]:
+            return {
+                "enabled": True,
+                "uid": self.validator_config.emission_control["uid"],
+                "percentage": self.validator_config.emission_control["percentage"],
+            }
+
+        if self._emission_percentage is not None and self._emission_percentage < 1.0:
+            burn_percentage = 1.0 - self._emission_percentage
+            return {
+                "enabled": True,
+                "uid": 0,
+                "percentage": burn_percentage,
+            }
+
+        return None
+
     def set_weights(self):
         """Sets weights for miners"""
+        self._process_api_scoring_sync()
         self.update_base_scores()
         self.combine_consensus_scores()
         self.score_manager.upload_cache_file()
         bt.logging.info(f"miner_score:{self.scores}")
 
-        # Apply emission control if enabled
-        if self.validator_config.emission_control["enabled"]:
-            target_uid = self.validator_config.emission_control["uid"]
-            percentage = self.validator_config.emission_control["percentage"]
+        # Apply emission control using effective_emission_control property
+        emission_control = self.effective_emission_control
+        if emission_control and emission_control["enabled"]:
+            target_uid = emission_control["uid"]
+            percentage = emission_control["percentage"]
             bt.logging.info(
                 f"Setting weights to {round(percentage*100)}% for emission controlling UID {target_uid} and {round((1-percentage)*100)}% for the rest."
             )
-            self.emission_control_scores(target_uid)
+            self.emission_control_scores(target_uid, percentage)
 
         bt.logging.info("==========start Setting weights==========")
         super().set_weights()
         bt.logging.info("==========end Setting weights==========")
         return
 
-    def emission_control_scores(self, target_uid):
-        """
-        Adjusts scores to give a specific percentage of total weight to a target UID
-        and distribute the remaining weight proportionally among other UIDs
+    def _run_api_scoring_in_thread(self):
+        """Run API scoring in a separate thread with its own event loop"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.score_manager.process_api_scoring())
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                loop.close()
+        except Exception as e:
+            bt.logging.error(f"Error processing API scoring in thread: {str(e)}")
+            bt.logging.error(traceback.format_exc())
 
-        Args:
-            target_uid: The UID to give controlled percentage of total weight
-        """
+    def _process_api_scoring_sync(self):
+        """Process API scoring synchronously before calculating weights"""
+        try:
+            try:
+                asyncio.get_running_loop()
+                thread = threading.Thread(
+                    target=self._run_api_scoring_in_thread, daemon=True
+                )
+                thread.start()
+                thread.join(timeout=30)
+                if thread.is_alive():
+                    bt.logging.warning("API scoring thread timed out")
+            except RuntimeError:
+                self._run_api_scoring_in_thread()
+        except Exception as e:
+            bt.logging.error(f"Error processing API scoring: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    def emission_control_scores(self, target_uid, percentage=None):
+        """Adjust scores: assign specified percentage to target UID, distribute remaining proportionally to others"""
         scores = self.scores
         total_score = np.sum(scores)
 
@@ -335,23 +393,17 @@ class VideoValidator(BaseValidatorNeuron):
             )
             return
 
-        # Get percentage from config
-        percentage = self.validator_config.emission_control["percentage"]
+        if percentage is None:
+            percentage = self.validator_config.emission_control["percentage"]
 
-        # Calculate new target score based on percentage of total
         new_target_score = percentage * total_score
-
-        # Calculate remaining weight for other UIDs
         remaining_weight = (1 - percentage) * total_score
-
-        # Calculate current total of non-target scores
         total_other_scores = total_score - scores[target_uid]
 
         if total_other_scores == 0:
             bt.logging.warning("All scores are zero except target UID, cannot scale.")
             return
 
-        # Scale other scores proportionally
         new_scores = np.zeros_like(scores, dtype=float)
         for uid in range(len(scores)):
             if uid == target_uid:

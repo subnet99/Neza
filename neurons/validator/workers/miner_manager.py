@@ -5,6 +5,7 @@ import traceback
 from typing import List, Dict, Any, Optional, Set
 import random
 import bittensor as bt
+from neza.utils.http import sync_miner_api_models
 
 
 class MinerManager:
@@ -30,6 +31,7 @@ class MinerManager:
         self.miner_online = []
         self.miner_info_cache = {}
         self.miners_cache_ttl = self.validator.validator_config.miners_cache_ttl
+        self.api_miners_cache = {}
 
     def init_miners_cache(self):
         """
@@ -39,6 +41,7 @@ class MinerManager:
         with self.validator._subtensor_lock:
             current_block = self.validator.subtensor.get_current_block()
         self._update_miners_in_thread(current_block)
+        self._update_api_miners_in_thread(current_block)
 
     def update_miners_on_block(self, block):
         """
@@ -54,7 +57,7 @@ class MinerManager:
 
             # Start a new thread to handle the update to avoid WebSocket concurrency issues
             thread = threading.Thread(
-                target=self._update_miners_in_thread, args=(block,)
+                target=self.update_miners_info_on_block, args=(block,)
             )
             thread.daemon = True
             thread.start()
@@ -62,6 +65,10 @@ class MinerManager:
         except Exception as e:
             bt.logging.error(f"Error updating miners on block: {str(e)}")
             bt.logging.error(traceback.format_exc())
+
+    def update_miners_info_on_block(self, block):
+        self._update_miners_in_thread(block)
+        self._update_api_miners_in_thread(block)
 
     def _update_miners_in_thread(self, block):
         """
@@ -155,7 +162,34 @@ class MinerManager:
                 loop.close()
 
         except Exception as e:
-            bt.logging.error(f"Error in _update_miners_in_thread: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    def _update_api_miners_in_thread(self, block):
+        """
+        Updates API miners information in a separate thread to avoid WebSocket concurrency issues
+
+        Args:
+            block: Current block number
+        """
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                api_models = loop.run_until_complete(
+                    sync_miner_api_models(self.validator.wallet)
+                )
+                if api_models:
+                    bt.logging.info(f"API miners: {api_models}")
+                    self.api_miners_cache = api_models
+                    bt.logging.info(f"Synced {len(api_models)} API miners")
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+        except Exception as e:
+            bt.logging.error(f"Error in _update_api_miners_in_thread: {str(e)}")
+            bt.logging.error(traceback.format_exc())
 
     def _update_available_miners_sync(self):
         """Synchronously updates available miners list"""
@@ -223,6 +257,78 @@ class MinerManager:
         except Exception as e:
             bt.logging.error(f"Error updating miners list: {str(e)}")
             bt.logging.error(traceback.format_exc())
+
+    def get_stake_metrics(self):
+        """
+        Calculates stake metrics for validators and miners
+
+        Returns:
+            dict: {
+                "avg_validator_stake": float,
+                "total_miner_stake": float,
+                "avg_miner_stake": float,
+                "miner_stakes": dict {uid: stake}
+            }
+        """
+        try:
+            metagraph = self.validator.metagraph
+
+            validator_stakes = []
+            for uid in range(len(metagraph.hotkeys)):
+                stake = float(metagraph.S[uid])
+
+                is_validator = stake >= 10000
+                if hasattr(metagraph, "validator_permit"):
+                    is_validator = is_validator and metagraph.validator_permit[uid]
+
+                if is_validator:
+                    validator_stakes.append(stake)
+
+            avg_validator_stake = (
+                sum(validator_stakes) / len(validator_stakes)
+                if validator_stakes
+                else 0.0
+            )
+
+            available_miners = self.get_available_miners_cache()
+            miner_stakes_dict = {}
+            all_miner_stakes = []
+
+            for uid in available_miners:
+                stake = float(metagraph.S[uid])
+                miner_stakes_dict[uid] = stake
+                all_miner_stakes.append(stake)
+
+            total_miner_stake = sum(all_miner_stakes)
+
+            avg_miner_stake = 0.0
+            if all_miner_stakes:
+                sorted_stakes = sorted(all_miner_stakes)
+
+                cutoff_index = int(len(sorted_stakes) * 0.1)
+                valid_stakes = sorted_stakes[cutoff_index:]
+
+                if valid_stakes:
+                    avg_miner_stake = max(
+                        sum(valid_stakes), avg_validator_stake * 0.5
+                    ) / len(valid_stakes)
+
+            return {
+                "avg_validator_stake": avg_validator_stake,
+                "total_miner_stake": total_miner_stake,
+                "avg_miner_stake": avg_miner_stake,
+                "miner_stakes": miner_stakes_dict,
+            }
+
+        except Exception as e:
+            bt.logging.error(f"Error calculating stake metrics: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+            return {
+                "avg_validator_stake": 0.0,
+                "total_miner_stake": 0.0,
+                "avg_miner_stake": 0.0,
+                "miner_stakes": {},
+            }
 
     def get_available_miners_cache(self):
         """

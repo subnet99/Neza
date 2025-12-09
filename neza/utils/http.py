@@ -5,6 +5,7 @@ Provides HTTP related utility functions
 
 from typing import Any
 import aiohttp
+import asyncio
 import bittensor as bt
 import os
 import time
@@ -16,6 +17,7 @@ import email.utils
 import zipfile
 import shutil
 import urllib.parse
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -1064,7 +1066,7 @@ async def register_miner_api_keys(miner_wallet, models_dict):
             async with session.post(
                 api_url, json=body, headers=headers, timeout=30
             ) as response:
-                if response.status == 200:
+                if response.status >= 200 and response.status < 300:
                     bt.logging.info("Successfully registered API keys")
                     return True
                 else:
@@ -1077,3 +1079,140 @@ async def register_miner_api_keys(miner_wallet, models_dict):
     except Exception as e:
         bt.logging.error(f"Error registering API keys: {str(e)}")
         return False
+
+
+async def sync_miner_api_models(validator_wallet):
+    """
+    Get miner supported models from Owner
+    """
+    try:
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            return {}
+
+        api_url = f"{owner_host}/v2/public/miner-models"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, timeout=30) as response:
+                if response.status == 200:
+                    return await response.json()
+                return {}
+    except Exception as e:
+        bt.logging.error(f"Error syncing miner models: {str(e)}")
+        return {}
+
+
+async def get_api_miner_stats(validator_wallet):
+    """
+    Get API miner statistics for scoring
+    """
+    try:
+        owner_host = os.environ.get("OWNER_HOST", "")
+        if not owner_host:
+            return {}
+
+        timestamp = int(time.time())
+        start_ts = timestamp - 2 * 600
+
+        body = {
+            "validator_hotkey": validator_wallet.hotkey.ss58_address,
+            "timestamp": timestamp,
+            "start_ts": start_ts,
+        }
+
+        message = generate_signature_message(body, ["validator_signature"])
+        signature = validator_wallet.hotkey.sign(message.encode()).hex()
+        body["validator_signature"] = signature
+
+        api_url = f"{owner_host}/v2/validator/miner-stats"
+        headers = {"Content-Type": "application/json"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=body, headers=headers, timeout=30
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                return {}
+    except Exception as e:
+        bt.logging.error(f"Error getting API miner stats: {str(e)}")
+        return {}
+
+
+async def listen_for_api_tasks(validator_wallet, task_handler):
+    """
+    Listen for API tasks via WebSocket and respond with decision
+
+    Args:
+        validator_wallet: Validator wallet
+        task_handler: Async function that takes request data and returns decision dict
+    """
+    while True:
+        try:
+            owner_host = os.environ.get("OWNER_HOST", "")
+            if not owner_host:
+                bt.logging.error("OWNER_HOST environment variable not set")
+                await asyncio.sleep(60)
+                continue
+
+            ws_host = owner_host.replace("http://", "ws://").replace(
+                "https://", "wss://"
+            )
+
+            timestamp = int(time.time())
+            auth_body = {
+                "validator_hotkey": validator_wallet.hotkey.ss58_address,
+                "timestamp": timestamp,
+            }
+            message = generate_signature_message(auth_body)
+            signature = validator_wallet.hotkey.sign(message.encode()).hex()
+
+            query_params = {
+                "validator_hotkey": validator_wallet.hotkey.ss58_address,
+                "timestamp": str(timestamp),
+                "validator_signature": signature,
+            }
+            ws_url = f"{ws_host}/v2/validator/ws?{urllib.parse.urlencode(query_params)}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(ws_url) as ws:
+                    bt.logging.info("Connected to API task stream")
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                data = json.loads(msg.data)
+                                match data.get("type"):
+                                    case "ping":
+                                        await ws.send_json({"type": "pong"})
+                                        continue
+
+                                    case "request_miner":
+                                        decision = await task_handler(data)
+
+                                        response_data = {
+                                            "type": "miner_response",
+                                            "miner_hotkey": None,
+                                            "request_id": data["request_id"],
+                                            **decision,
+                                        }
+
+                                        await ws.send_json(response_data)
+                                        continue
+                                    case _:
+                                        bt.logging.info(
+                                            f"Unknown message type: {data.get('type')}, full data: {data}"
+                                        )
+                                        continue
+                            except Exception as e:
+                                bt.logging.error(
+                                    f"Error processing WS message: {str(e)}"
+                                )
+                        elif msg.type == aiohttp.WSMsgType.ERROR:
+                            bt.logging.error(
+                                "ws connection closed with exception %s", ws.exception()
+                            )
+                            break
+
+        except Exception as e:
+            bt.logging.error(f"Error in API task listener: {str(e)}")
+            await asyncio.sleep(30)
