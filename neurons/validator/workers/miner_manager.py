@@ -123,10 +123,12 @@ class MinerManager:
                     continue
 
                 hotkey = metagraph.hotkeys[uid]
+                stake = float(metagraph.stake[uid])
                 miner_info_cache[hotkey] = {
                     "uid": uid,
                     "hotkey": hotkey,
-                    "stake": float(metagraph.stake[uid]),
+                    "stake": 0,
+                    "original_stake": stake,
                     "trust": float(metagraph.trust[uid]),
                     "incentive": float(metagraph.incentive[uid]),
                     "consensus": float(metagraph.consensus[uid]),
@@ -194,27 +196,32 @@ class MinerManager:
     def _update_available_miners_sync(self):
         """Synchronously updates available miners list"""
         try:
-            # Validator stake limit (validators with stake above this won't be selected as miners)
-            validator_stake_limit = 10000
-
             available_miners = []
             miner_info_cache = {}
+            metagraph = self.validator.metagraph
 
-            # Iterate through all nodes
-            for uid in range(len(self.validator.metagraph.hotkeys)):
-                # Skip self
+            coldkey_to_hotkeys = {}
+            for uid in range(len(metagraph.hotkeys)):
                 if uid == self.validator.uid:
                     continue
 
-                # Get node info
-                stake = self.validator.metagraph.S[uid].item()
-                axon = self.validator.metagraph.axons[uid]
-                hotkey = self.validator.metagraph.hotkeys[uid]
+                stake = metagraph.S[uid].item()
+                axon = metagraph.axons[uid]
+                hotkey = metagraph.hotkeys[uid]
+                coldkey = metagraph.coldkeys[uid]
 
-                # Cache miner information
+                is_online = axon.is_serving and axon.ip != "0.0.0.0" and axon.port != 0
+                if not is_online:
+                    continue
+
+                is_validator = metagraph.validator_permit[uid]
+                if is_validator:
+                    continue
+
                 miner_info_cache[hotkey] = {
                     "uid": uid,
-                    "stake": stake,
+                    "stake": 0,
+                    "original_stake": stake,
                     "axon": {
                         "ip": axon.ip,
                         "port": axon.port,
@@ -223,24 +230,57 @@ class MinerManager:
                     "hotkey": hotkey,
                 }
 
-                # Check if node is online
-                is_online = axon.is_serving and axon.ip != "0.0.0.0" and axon.port != 0
-                if not is_online:
-                    continue
-
-                # Skip validators with high stake
-                if (
-                    hasattr(self.validator.metagraph, "validator_permit")
-                    and self.validator.metagraph.validator_permit[uid]
-                ):
-                    if stake > validator_stake_limit:
-                        bt.logging.debug(
-                            f"Skipping UID {uid}: validator stake too high ({stake} > {validator_stake_limit})"
-                        )
-                        continue
+                if coldkey not in coldkey_to_hotkeys:
+                    coldkey_to_hotkeys[coldkey] = []
+                coldkey_to_hotkeys[coldkey].append(hotkey)
 
                 # Add to available miners list
                 available_miners.append(uid)
+
+            # Calculate coldkey stake info and update miner stake
+            coldkey_stakes = {}
+            netuid = self.validator.config.netuid
+
+            with self.validator._subtensor_lock:
+                for coldkey, hotkeys in coldkey_to_hotkeys.items():
+                    try:
+                        stake_info_list = [
+                            info
+                            for info in self.validator.subtensor.get_stake_info_for_coldkey(
+                                coldkey
+                            )
+                            if info.netuid == netuid
+                        ]
+
+                        if not stake_info_list:
+                            continue
+
+                        total_stake = sum(info.stake.tao for info in stake_info_list)
+                        miner_count = len(stake_info_list)
+                        stake_per_hotkey = total_stake / miner_count
+
+                        coldkey_stakes[coldkey] = {
+                            "total_stake": total_stake,
+                            "miner_count": miner_count,
+                            "stake_per_hotkey": stake_per_hotkey,
+                        }
+
+                        caches_to_update = [miner_info_cache]
+                        if self.validator.miner_info_cache:
+                            caches_to_update.append(self.validator.miner_info_cache)
+                        if self.miner_info_cache:
+                            caches_to_update.append(self.miner_info_cache)
+
+                        for hotkey in hotkeys:
+                            for cache in caches_to_update:
+                                if hotkey in cache:
+                                    cache[hotkey]["stake"] = stake_per_hotkey
+
+                    except Exception as e:
+                        bt.logging.warning(
+                            f"Error getting stake info for coldkey {coldkey}: {str(e)}"
+                        )
+                        continue
 
             # Update cache
             random.shuffle(available_miners)
@@ -253,6 +293,7 @@ class MinerManager:
                 f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners}"
             )
             bt.logging.info(f"Cached information for {len(miner_info_cache)} miners")
+            bt.logging.info(f"Updated stake info for {len(coldkey_stakes)} coldkeys")
 
         except Exception as e:
             bt.logging.error(f"Error updating miners list: {str(e)}")
@@ -277,9 +318,7 @@ class MinerManager:
             for uid in range(len(metagraph.hotkeys)):
                 stake = float(metagraph.S[uid])
 
-                is_validator = stake >= 10000
-                if hasattr(metagraph, "validator_permit"):
-                    is_validator = is_validator and metagraph.validator_permit[uid]
+                is_validator = metagraph.validator_permit[uid]
 
                 if is_validator:
                     validator_stakes.append(stake)
@@ -295,7 +334,11 @@ class MinerManager:
             all_miner_stakes = []
 
             for uid in available_miners:
-                stake = float(metagraph.S[uid])
+                hotkey = metagraph.hotkeys[uid]
+                if hotkey in self.miner_info_cache:
+                    stake = self.miner_info_cache[hotkey].get("stake", 0.0)
+                else:
+                    stake = float(metagraph.S[uid])
                 miner_stakes_dict[uid] = stake
                 all_miner_stakes.append(stake)
 
