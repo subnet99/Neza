@@ -244,7 +244,7 @@ class MinerManager:
             with self.validator._subtensor_lock:
                 for coldkey, hotkeys in coldkey_to_hotkeys.items():
                     try:
-                        stake_info_list = [
+                        all_stake_info = [
                             info
                             for info in self.validator.subtensor.get_stake_info_for_coldkey(
                                 coldkey
@@ -252,11 +252,19 @@ class MinerManager:
                             if info.netuid == netuid
                         ]
 
-                        if not stake_info_list:
+                        if not all_stake_info:
                             continue
 
-                        total_stake = sum(info.stake.tao for info in stake_info_list)
-                        miner_count = len(stake_info_list)
+                        total_stake = sum(info.stake.tao for info in all_stake_info)
+
+                        registered_stake_info = [
+                            info for info in all_stake_info if info.is_registered
+                        ]
+                        miner_count = len(registered_stake_info)
+
+                        if miner_count == 0:
+                            continue
+
                         stake_per_hotkey = total_stake / miner_count
 
                         coldkey_stakes[coldkey] = {
