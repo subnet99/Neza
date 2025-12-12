@@ -13,6 +13,7 @@ import numpy as np
 import math
 from typing import Dict, List, Optional, Any, Tuple
 from neza.utils.http import upload_cache_file_sync, get_api_miner_stats
+from neza.configs.default_config import score_manager_default_config
 
 
 class MinerScoreManager:
@@ -22,13 +23,6 @@ class MinerScoreManager:
     """
 
     # Constants
-    DEFAULT_CACHE_VERSION = 1
-    DEFAULT_MIN_CACHE_VERSION = 1
-    DEFAULT_HISTORY_WEIGHT = 0.3
-    DEFAULT_CURRENT_WEIGHT = 0.7
-    DEFAULT_MAX_HISTORY = 10
-    DEFAULT_SLIDING_WINDOW = 30
-    DEFAULT_ALWAYS_SAVE_CACHE = True
     DEFAULT_CACHE_FILE = ".score/score_cache.json"
 
     # Sigmoid function parameters
@@ -39,14 +33,6 @@ class MinerScoreManager:
     MIN_SCORE_FACTOR = 0.9
     LOW_SCORE_THRESHOLD = 1.1
     BASE_SCORE = 0.05
-
-    # Default weights
-    DEFAULT_COMFY_TASK_WEIGHT = 0.2
-    DEFAULT_API_TASK_WEIGHT = 0.8
-
-    DEFAULT_EMISSION_MIN = 0.2
-    DEFAULT_EMISSION_MAX = 1.0
-    DEFAULT_EMISSION_MAX_PRO = 1.0
 
     def __init__(self, config, validator):
         """Initialize score manager
@@ -90,28 +76,7 @@ class MinerScoreManager:
             and self.config.score_manager is not None
         ):
             return self.config.score_manager
-        return {
-            "emission_min": 0.3,
-            "emission_max": 1.0,
-            "emission_max_pro": 1.0,
-            "emission_k1": 3.0,
-            "emission_k2": 0.5,
-            "emission_transition": 0.5,
-            "miner_factor_min": 0.2,
-            "miner_factor_max": 2.5,
-            "miner_factor_k1": 4.0,
-            "miner_factor_k2": 1.0,
-            "miner_factor_transition": 0.5,
-            "comfy_task_weight": self.DEFAULT_COMFY_TASK_WEIGHT,
-            "api_task_weight": self.DEFAULT_API_TASK_WEIGHT,
-            "history_weight": self.DEFAULT_HISTORY_WEIGHT,
-            "current_weight": self.DEFAULT_CURRENT_WEIGHT,
-            "max_history": self.DEFAULT_MAX_HISTORY,
-            "sliding_window": self.DEFAULT_SLIDING_WINDOW,
-            "always_save_cache": self.DEFAULT_ALWAYS_SAVE_CACHE,
-            "min_cache_version": self.DEFAULT_MIN_CACHE_VERSION,
-            "cache_version": self.DEFAULT_CACHE_VERSION,
-        }
+        return score_manager_default_config
 
     def initialize(self):
         """Initialize score manager and load cache
@@ -356,6 +321,52 @@ class MinerScoreManager:
             float: sigmoid result
         """
         return 1 / (1 + np.exp(-self.SIGMOID_STEEPNESS * (x - self.SIGMOID_MIDPOINT)))
+
+    def calculate_sora2_time_factor(self, avg_time):
+        """Calculate time factor for sora-2 model scoring based on processing time
+
+        Args:
+            avg_time: Average processing time in seconds
+
+        Returns:
+            float: Time factor multiplier
+        """
+        if avg_time is None or avg_time <= 0:
+            return 1.0
+
+        baseline = self.score_config["sora2_baseline_time"]
+        max_reward_time = self.score_config["sora2_max_reward_time"]
+        max_factor = self.score_config["sora2_time_max_factor"]
+        min_factor = self.score_config["sora2_time_min_factor"]
+        sigmoid_steepness = self.score_config["sora2_time_sigmoid_steepness"]
+        penalty_factor = self.score_config["sora2_time_penalty_factor"]
+
+        normalized_diff = (avg_time - baseline) / baseline
+
+        if avg_time <= baseline:
+            if avg_time <= max_reward_time:
+                return max_factor
+            time_range = baseline - max_reward_time
+            factor_range = max_factor - 1.0
+            normalized_time = (avg_time - max_reward_time) / time_range
+            reward_factor = max_factor - factor_range * normalized_time**2
+            bt.logging.debug(f"Sora2 time factor: {reward_factor:.4f}")
+            return reward_factor
+        else:
+            scale_range = 1.0 - min_factor
+            sigmoid_raw = 1.0 / (1.0 + np.exp(-sigmoid_steepness * normalized_diff))
+            sigmoid_value = 2.0 * (sigmoid_raw - 0.5)
+            base_penalty = 1.0 - scale_range * sigmoid_value
+            penalty_factor_value = base_penalty
+            if normalized_diff > 0.5:
+                extra_penalty = np.exp(-penalty_factor * (normalized_diff - 0.5))
+                penalty_factor_value = (
+                    min_factor + (penalty_factor_value - min_factor) * extra_penalty
+                )
+            bt.logging.debug(
+                f"Sora2 time factor: {penalty_factor_value:.4f}, reward_factor: {max(min_factor, min(1.0, penalty_factor_value))}"
+            )
+            return max(min_factor, min(1.0, penalty_factor_value))
 
     def normalize_api_scores(self, api_avg_scores):
         """Normalize API scores to 0-1 range using percentile-based normalization
@@ -860,10 +871,23 @@ class MinerScoreManager:
                     call_count = stat.get("call_count", 0)
                     success_count = stat.get("success_count", 0)
                     total_cost = stat.get("total_cost", 0.0)
+                    avg_time = stat.get("avg_duration")
 
                     if call_count > 0:
                         success_rate = success_count / call_count
                         model_score = total_cost * success_rate
+
+                        if (
+                            model_name in ["sora-2", "sora-2-pro"]
+                            and avg_time is not None
+                        ):
+                            time_factor = self.calculate_sora2_time_factor(avg_time)
+                            model_score *= time_factor
+                            bt.logging.debug(
+                                f"Miner {hotkey[:10]}... sora-2 model: avg_time={avg_time:.2f}s, "
+                                f"time_factor={time_factor:.4f}, adjusted_score={model_score:.4f}"
+                            )
+
                         miner_total_score += model_score * model_weight
 
                 self.record_score(hotkey, "api_task", miner_total_score)
