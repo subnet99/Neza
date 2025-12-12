@@ -1029,13 +1029,14 @@ async def get_online_task_count(validator_wallet, count=1):
         return 0, []
 
 
-async def register_miner_api_keys(miner_wallet, models_dict):
+async def register_miner_api_keys(miner_wallet, channels=None, models_dict=None):
     """
     Register miner API keys with Owner
 
     Args:
         miner_wallet: Miner wallet
-        models_dict: Dictionary of {model_name: [key1, key2]}
+        channels: List of channel configs [{"model": "sora-2", "base_url": "string", "keys": ["string"]}]
+        models_dict: Dictionary of {model_name: [key1, key2]} (legacy format)
     """
     try:
         owner_host = os.environ.get("OWNER_HOST", "")
@@ -1048,8 +1049,11 @@ async def register_miner_api_keys(miner_wallet, models_dict):
         body = {
             "miner_hotkey": miner_wallet.hotkey.ss58_address,
             "timestamp": timestamp,
-            **models_dict,
         }
+        if channels:
+            body["channels"] = channels
+        if models_dict:
+            body.update(models_dict)
 
         # Generate signature
         exclude_fields = ["miner_signature"]
