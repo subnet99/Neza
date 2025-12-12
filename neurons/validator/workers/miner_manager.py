@@ -256,11 +256,7 @@ class MinerManager:
                             continue
 
                         total_stake = sum(info.stake.tao for info in all_stake_info)
-
-                        registered_stake_info = [
-                            info for info in all_stake_info if info.is_registered
-                        ]
-                        miner_count = len(registered_stake_info)
+                        miner_count = len(hotkeys)
 
                         if miner_count == 0:
                             continue
