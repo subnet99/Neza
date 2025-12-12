@@ -1,0 +1,23 @@
+[
+  {
+    "model": "sora-2",
+    "keys": [
+      "your-api-key-1",
+      "your-api-key-2"
+    ]
+  },
+  {
+    "model": "sora-2",
+    "keys": [
+      "your-api-key-3"
+    ],
+    "base_url": "https://api.example.com"
+  },
+  {
+    "model": "sora-2-pro",
+    "keys": [
+      "your-api-key-3"
+    ],
+    "base_url": "https://api.example.com"
+  }
+]

@@ -595,61 +595,71 @@ class VideoMiner(BaseMinerNeuron):
     def _maintain_api_registration(self):
         """Register API keys with Owner on startup"""
         try:
-            # Load models from env
+            # Load channels from .keys.json
+            channels = None
+            keys_json_path = os.path.join(os.getcwd(), ".keys.json")
+            if os.path.exists(keys_json_path):
+                try:
+                    with open(keys_json_path, "r", encoding="utf-8") as f:
+                        channels = json.load(f)
+                except Exception as e:
+                    bt.logging.error(f"Error loading .keys.json: {str(e)}")
+
             api_models_str = os.environ.get("API_MODELS", "").strip()
             api_models = {}
+            if api_models_str:
+                try:
+                    groups = api_models_str.split(";")
+                    for group in groups:
+                        group = group.strip()
+                        if not group:
+                            continue
+                        if "|" not in group:
+                            bt.logging.warning(
+                                f"Invalid format in group: {group}, missing '|' separator"
+                            )
+                            continue
 
-            if not api_models_str:
-                bt.logging.info("API_MODELS not set, skipping API registration")
-                return
+                        parts = group.split("|", 1)
+                        if len(parts) != 2:
+                            bt.logging.warning(
+                                f"Invalid format in group: {group}, expected 'models|keys'"
+                            )
+                            continue
 
-            try:
-                groups = api_models_str.split(";")
-                for group in groups:
-                    group = group.strip()
-                    if not group:
-                        continue
-                    if "|" not in group:
-                        bt.logging.warning(
-                            f"Invalid format in group: {group}, missing '|' separator"
+                        models_part, keys_part = parts
+                        model_names = [
+                            m.strip() for m in models_part.split(",") if m.strip()
+                        ]
+                        keys = [k.strip() for k in keys_part.split(",") if k.strip()]
+
+                        if not model_names or not keys:
+                            bt.logging.warning(
+                                f"Invalid format in group: {group} (empty models or keys)"
+                            )
+                            continue
+
+                        for model_name in model_names:
+                            if model_name in api_models:
+                                existing_keys = api_models[model_name]
+                                for key in keys:
+                                    if key not in existing_keys:
+                                        existing_keys.append(key)
+                                bt.logging.info(
+                                    f"Added keys to existing model '{model_name}': {keys}"
+                                )
+                            else:
+                                api_models[model_name] = keys.copy()
+
+                    if api_models:
+                        bt.logging.info(
+                            f"Loaded {len(api_models)} models from API_MODELS"
                         )
-                        continue
+                except Exception as e:
+                    bt.logging.error(f"Error parsing API_MODELS: {str(e)}")
 
-                    parts = group.split("|", 1)
-                    if len(parts) != 2:
-                        bt.logging.warning(
-                            f"Invalid format in group: {group}, expected 'models|keys'"
-                        )
-                        continue
-
-                    models_part, keys_part = parts
-                    model_names = [
-                        m.strip() for m in models_part.split(",") if m.strip()
-                    ]
-                    keys = [k.strip() for k in keys_part.split(",") if k.strip()]
-
-                    if not model_names or not keys:
-                        bt.logging.warning(
-                            f"Invalid format in group: {group} (empty models or keys)"
-                        )
-                        continue
-
-                    for model_name in model_names:
-                        if model_name in api_models:
-                            existing_keys = api_models[model_name]
-                            for key in keys:
-                                if key not in existing_keys:
-                                    existing_keys.append(key)
-                        else:
-                            api_models[model_name] = keys.copy()
-
-                if api_models:
-                    bt.logging.info(f"Loaded {len(api_models)} models from API_MODELS")
-                else:
-                    bt.logging.warning("No valid models found in API_MODELS")
-                    return
-            except Exception as e:
-                bt.logging.error(f"Error parsing API_MODELS: {str(e)}")
+            if not channels and not api_models:
+                bt.logging.info("No API keys found, skipping registration")
                 return
 
             # Register API keys
@@ -657,7 +667,11 @@ class VideoMiner(BaseMinerNeuron):
             asyncio.set_event_loop(loop)
             try:
                 success = loop.run_until_complete(
-                    register_miner_api_keys(self.wallet, api_models)
+                    register_miner_api_keys(
+                        self.wallet,
+                        channels=channels,
+                        models_dict=api_models if api_models else None,
+                    )
                 )
                 if success:
                     bt.logging.info("Successfully registered API keys with Owner")

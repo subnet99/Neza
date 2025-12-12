@@ -85,6 +85,37 @@ COMFYUI_SERVERS=127.0.0.1:8188
 API_MODELS=
 ```
 
+3. Configure API keys using `.keys.json` file (compatible with API_MODELS):
+
+```bash
+cp .keys.json.example .keys.json
+```
+
+Edit `.keys.json` and fill in your API keys:
+
+```json
+[
+  {
+    "model": "sora-2",
+    "keys": [
+      "your-api-key-1",
+      "your-api-key-2"
+    ],
+    "base_url": "https://xxx.azure.com"
+  },
+  {
+    "model": "sora-2-pro",
+    "keys": [
+      "your-api-key-3"
+    ]
+  }
+]
+```
+
+**Note**: 
+- You can use `API_MODELS` environment variable and `.keys.json` file together. Both configurations will be loaded and merged. The `.keys.json` file supports more flexible configuration with base_url per model.
+- The `base_url` field is optional. If not provided, the system will use the official default API address for that model.
+
 ## Miner Startup Command
 
 Mainnet
