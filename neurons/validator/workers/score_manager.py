@@ -65,7 +65,7 @@ class MinerScoreManager:
         self.global_verification_errors = 0
         self.FAILURE_THRESHOLD = 3
 
-        self.upldate_miner_state()
+        self.update_miner_state()
 
         bt.logging.info("Miner score manager initialization complete")
 
@@ -176,7 +176,7 @@ class MinerScoreManager:
             bt.logging.error(f"Failed to load cache: {str(e)}")
             bt.logging.error(traceback.format_exc())
 
-    def upldate_miner_state(self):
+    def update_miner_state(self):
         """Initialize state"""
         self.miner_hotkeys = self.validator.miner_manager.all_miner_hotkeys
         self.hotkey_to_uid = self.validator.miner_manager.hotkey_to_uid
@@ -322,51 +322,49 @@ class MinerScoreManager:
         """
         return 1 / (1 + np.exp(-self.SIGMOID_STEEPNESS * (x - self.SIGMOID_MIDPOINT)))
 
-    def calculate_sora2_time_factor(self, avg_time):
-        """Calculate time factor for sora-2 model scoring based on processing time
+    def _smooth_sigmoid(self, x, steepness=4.0):
+        return 0.5 * (1.0 + math.tanh(steepness * x))
 
-        Args:
-            avg_time: Average processing time in seconds
-
-        Returns:
-            float: Time factor multiplier
-        """
+    def calculate_sora2_time_factor(self, avg_time, model_name="sora-2"):
         if avg_time is None or avg_time <= 0:
             return 1.0
+        if model_name == "sora-2-pro":
+            baseline = self.score_config["sora_2_pro_baseline"]
+            max_reward_time = self.score_config["sora_2_pro_max_reward_time"]
+            penalty_time = self.score_config["sora_2_pro_penalty_time"]
+        else:
+            baseline = self.score_config["sora_2_baseline"]
+            max_reward_time = self.score_config["sora_2_max_reward_time"]
+            penalty_time = self.score_config["sora_2_penalty_time"]
 
-        baseline = self.score_config["sora2_baseline_time"]
-        max_reward_time = self.score_config["sora2_max_reward_time"]
         max_factor = self.score_config["sora2_time_max_factor"]
         min_factor = self.score_config["sora2_time_min_factor"]
         sigmoid_steepness = self.score_config["sora2_time_sigmoid_steepness"]
-        penalty_factor = self.score_config["sora2_time_penalty_factor"]
 
-        normalized_diff = (avg_time - baseline) / baseline
+        time_offset = avg_time - baseline
+        scale_fast = baseline - max_reward_time
+        scale_slow = penalty_time - baseline
+        scale = (
+            (scale_fast + scale_slow) / 2.0
+            if (scale_fast > 0 and scale_slow > 0)
+            else max(scale_fast, scale_slow)
+        )
+        if scale <= 0:
+            scale = baseline * 0.5
 
-        if avg_time <= baseline:
-            if avg_time <= max_reward_time:
-                return max_factor
-            time_range = baseline - max_reward_time
-            factor_range = max_factor - 1.0
-            normalized_time = (avg_time - max_reward_time) / time_range
-            reward_factor = max_factor - factor_range * normalized_time**2
-            bt.logging.debug(f"Sora2 time factor: {reward_factor:.4f}")
-            return reward_factor
+        normalized_offset = time_offset / scale
+        sigmoid_value = self._smooth_sigmoid(
+            -normalized_offset, steepness=sigmoid_steepness
+        )
+
+        if sigmoid_value >= 0.5:
+            time_factor = 1.0 + (max_factor - 1.0) * ((sigmoid_value - 0.5) / 0.5)
         else:
-            scale_range = 1.0 - min_factor
-            sigmoid_raw = 1.0 / (1.0 + np.exp(-sigmoid_steepness * normalized_diff))
-            sigmoid_value = 2.0 * (sigmoid_raw - 0.5)
-            base_penalty = 1.0 - scale_range * sigmoid_value
-            penalty_factor_value = base_penalty
-            if normalized_diff > 0.5:
-                extra_penalty = np.exp(-penalty_factor * (normalized_diff - 0.5))
-                penalty_factor_value = (
-                    min_factor + (penalty_factor_value - min_factor) * extra_penalty
-                )
-            bt.logging.debug(
-                f"Sora2 time factor: {penalty_factor_value:.4f}, reward_factor: {max(min_factor, min(1.0, penalty_factor_value))}"
-            )
-            return max(min_factor, min(1.0, penalty_factor_value))
+            time_factor = min_factor + (1.0 - min_factor) * (sigmoid_value / 0.5)
+
+        time_factor = max(min_factor, min(max_factor, time_factor))
+        bt.logging.debug(f"{model_name} time factor: {time_factor:.4f}")
+        return time_factor
 
     def normalize_api_scores(self, api_avg_scores):
         """Normalize API scores to 0-1 range using percentile-based normalization
@@ -881,10 +879,12 @@ class MinerScoreManager:
                             model_name in ["sora-2", "sora-2-pro"]
                             and avg_time is not None
                         ):
-                            time_factor = self.calculate_sora2_time_factor(avg_time)
+                            time_factor = self.calculate_sora2_time_factor(
+                                avg_time, model_name
+                            )
                             model_score *= time_factor
                             bt.logging.debug(
-                                f"Miner {hotkey[:10]}... sora-2 model: avg_time={avg_time:.2f}s, "
+                                f"Miner {hotkey[:10]}... {model_name} model: avg_time={avg_time:.2f}s, "
                                 f"time_factor={time_factor:.4f}, adjusted_score={model_score:.4f}"
                             )
 

@@ -291,7 +291,7 @@ class MinerManager:
             self.available_miners_cache = available_miners
             self.miner_online = available_miners
             self.miners_cache_time = time.time()
-            self.validator.score_manager.upldate_miner_state()
+            self.validator.score_manager.update_miner_state()
 
             bt.logging.info(
                 f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners}"
