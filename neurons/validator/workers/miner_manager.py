@@ -793,14 +793,11 @@ class MinerManager:
 
         try:
             async with bt.Dendrite(self.validator.wallet) as dendrite:
-                responses = await asyncio.wait_for(
-                    dendrite.forward(
-                        axons=axons,
-                        synapse=ComfySupport(),
-                        deserialize=True,
-                        timeout=5,
-                    ),
-                    timeout=10,
+                responses = await dendrite.forward(
+                    axons=axons,
+                    synapse=ComfySupport(),
+                    deserialize=True,
+                    timeout=30,
                 )
 
                 for i, response in enumerate(responses):
@@ -810,10 +807,13 @@ class MinerManager:
                     if response and getattr(response, "supports_comfy", False):
                         comfy_supporters.add(uid)
 
-                bt.logging.debug(f"Miners {sorted(comfy_supporters)} support ComfyUI")
+                bt.logging.info(
+                    f"Query comfy support completed, found {len(comfy_supporters)} supporters"
+                )
 
         except Exception as e:
-            bt.logging.error(f"Error querying comfy support: {str(e)}")
+            bt.logging.error(f"Error querying comfy support: {e}")
+            bt.logging.error(traceback.format_exc())
 
         return comfy_supporters
 
