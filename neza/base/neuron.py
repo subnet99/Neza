@@ -30,7 +30,7 @@ class BaseNeuron(ABC):
 
     # Bittensor related properties
     subtensor: "bt.subtensor"
-    wallet: "bt.wallet"
+    wallet: "bt.Wallet"
     metagraph: "bt.metagraph"
     spec_version: int = spec_version
 
@@ -89,8 +89,8 @@ class BaseNeuron(ABC):
 
         # The wallet holds the cryptographic key pairs for the miner.
 
-        self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
+        self.wallet = bt.Wallet(config=self.config)
+        self.subtensor = bt.Subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
         bt.logging.info(f"Wallet: {self.wallet}")
@@ -292,9 +292,13 @@ class BaseNeuron(ABC):
                 "neuron.epoch_length was None, setting default value to 100"
             )
 
-        return (
-            self.block - self.metagraph.last_update[self.uid]
-        ) > self.config.neuron.epoch_length
+        try:
+            return (
+                self.block - self.metagraph.last_update[self.uid]
+            ) > self.config.neuron.epoch_length
+        except Exception as e:
+            bt.logging.warning("Failed to get block in should_sync_metagraph")
+            return False
 
     def should_set_weights(self) -> bool:
         # Don't set weights on initialization.
@@ -316,9 +320,15 @@ class BaseNeuron(ABC):
             )
 
         # Define appropriate logic for when set weights.
-        return (
-            self.block - self.metagraph.last_update[self.uid]
-        ) > self.config.neuron.epoch_length and self.neuron_type != "MinerNeuron"  # don't set weights if you're a miner
+        try:
+            return (
+                (self.block - self.metagraph.last_update[self.uid])
+                > self.config.neuron.epoch_length
+                and self.neuron_type != "MinerNeuron"
+            )
+        except Exception as e:
+            bt.logging.warning("Failed to get block in should_set_weights")
+            return False
 
     def save_state(self):
         bt.logging.trace(

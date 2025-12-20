@@ -8,6 +8,9 @@ score_manager_default_config = {
     "always_save_cache": True,
     "comfy_task_weight": 0.2,
     "api_task_weight": 0.8,
+    # Consensus score and local score ratio
+    "consensus_score_ratio": 0.5,
+    "local_score_ratio": 0.5,
     # Emission model: segmented exponential
     "emission_min": 1.0,
     "emission_max": 1.0,

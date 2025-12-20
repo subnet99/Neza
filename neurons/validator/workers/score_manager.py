@@ -897,3 +897,21 @@ class MinerScoreManager:
 
         except Exception as e:
             bt.logging.error(f"Error processing API scoring: {str(e)}")
+
+    def clear_task_scores_for_non_comfy_miners(self, comfy_support_uids: set):
+        """
+        Clear task_scores for miners that no longer support ComfyUI
+        Similar to API task scoring logic
+
+        Args:
+            comfy_support_uids: Set of UIDs that currently support ComfyUI
+        """
+        try:
+            for uid in self.task_scores:
+                if uid not in comfy_support_uids:
+                    hotkey = self.miner_hotkeys.get(uid, "Unknown")
+                    self.task_scores[uid] = [0.0]
+        except Exception as e:
+            bt.logging.error(
+                f"Error clearing task scores for non-comfy miners: {str(e)}"
+            )

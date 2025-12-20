@@ -62,6 +62,14 @@ class VideoTask(bt.Synapse):
     metadata_url: str = ""
     error: str = ""
 
+    # Proxy connection fields
+    proxy_comfy_url: str = ""
+    proxy_comfy_port: int = 8189
+    proxy_signature: str = ""
+    proxy_task_id: str = ""
+    prompt_id: str = ""
+    http_view_url: str = ""
+
     def deserialize(self) -> "VideoTask":
         """Deserialize response"""
         return self
@@ -137,6 +145,21 @@ class MinerCapacity(bt.Synapse):
     max_concurrent_tasks: int = 1
 
     def deserialize(self) -> "MinerCapacity":
+        """Deserialization handler"""
+        return self
+
+
+class ComfySupport(bt.Synapse):
+    """
+    Protocol definition for miner comfy support query
+
+    Attributes:
+        supports_comfy (bool): Whether the miner supports ComfyUI
+    """
+
+    supports_comfy: bool = False
+
+    def deserialize(self) -> "ComfySupport":
         """Deserialization handler"""
         return self
 

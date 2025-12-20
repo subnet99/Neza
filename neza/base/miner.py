@@ -37,7 +37,7 @@ class BaseMinerNeuron(BaseNeuron):
                 "You are allowing non-registered entities to send requests to your miner. This is a security risk."
             )
         # The axon handles request processing, allowing validators to send this miner requests.
-        self.axon = bt.axon(
+        self.axon = bt.Axon(
             wallet=self.wallet,
             config=self.config() if callable(self.config) else self.config,
         )
@@ -117,7 +117,13 @@ class BaseMinerNeuron(BaseNeuron):
             )
 
             while not self.should_exit:
-                current_block = self.block
+                try:
+                    current_block = self.block
+                except Exception as e:
+                    bt.logging.error("Failed to get current block")
+                    time.sleep(10)
+                    continue
+
                 current_time = time.time()
 
                 # Use locally cached last update block instead of relying on metagraph.last_update

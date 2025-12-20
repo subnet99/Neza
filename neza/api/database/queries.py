@@ -69,7 +69,7 @@ async def get_tasks(
         return []
     finally:
         if conn:
-            conn.close()
+            validator_db.put_connection(conn)
 
 
 async def get_system_stats() -> Dict[str, int]:
@@ -126,7 +126,7 @@ async def get_system_stats() -> Dict[str, int]:
         }
     finally:
         if conn:
-            conn.close()
+            validator_db.put_connection(conn)
 
 
 async def get_miners_stats() -> List[Dict[str, Any]]:
@@ -171,7 +171,7 @@ async def verify_task_secret(task_id: str, secret_key: str) -> bool:
         return False
     finally:
         if conn:
-            conn.close()
+            validator_db.put_connection(conn)
 
 
 async def get_task_history(task_id: str) -> List[Dict[str, Any]]:

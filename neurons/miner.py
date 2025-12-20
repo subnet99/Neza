@@ -6,9 +6,11 @@ import asyncio
 import typing
 from queue import PriorityQueue
 import bittensor as bt
-import shutil
+import socket
+import traceback
+import urllib.parse
 
-from neza.protocol import VideoTask, TaskStatusCheck
+from neza.protocol import VideoTask, ComfySupport
 
 # Import ComfyUI WebSocket API module
 from neza.api.comfy_ws_api import ComfyWSAPI
@@ -20,11 +22,15 @@ from neza.utils.http import (
     http_get_request_sync,
     http_put_request_sync,
     batch_download_and_package_outputs,
+    cleanup_task_files,
     register_miner_api_keys,
 )
 from neza.utils.tools import _parse_env_servers
+from neza.utils.proxy_auth import ProxyAuthManager
+from neza.utils.task_mapping_manager import TaskMappingManager
+from neza.utils.ws_proxy import WSProxyService
+from neza.utils.miner_http_server import MinerHTTPServer
 
-import traceback
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -44,6 +50,31 @@ class VideoMiner(BaseMinerNeuron):
         servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
         self.comfy_api = ComfyWSAPI(servers, clear_queue=False)
 
+        self.proxy_auth = ProxyAuthManager(self.wallet.hotkey.ss58_address)
+
+        self.task_mapping_manager = TaskMappingManager(
+            hotkey=self.wallet.hotkey.ss58_address,
+            cleanup_interval=int(os.getenv("TASK_MAPPING_CLEANUP_INTERVAL", "300")),
+            default_expiration=int(os.getenv("TASK_MAPPING_EXPIRATION", "7200")),
+        )
+
+        self.proxy_port = self.config.axon.port + 1
+        self.http_port = self.config.axon.port + 2
+
+        self.ws_proxy_service = WSProxyService(
+            self.task_mapping_manager,
+            self.proxy_auth,
+            proxy_port=self.proxy_port,
+            comfy_api=self.comfy_api,
+        )
+
+        # Register message callback for proxy forwarding
+        self.comfy_api.add_message_callback(self.ws_proxy_service.forward_message_sync)
+
+        self.http_server = MinerHTTPServer(
+            self.task_mapping_manager, port=self.http_port
+        )
+
         # Task queue and status management
         self.task_queue = PriorityQueue()  # Priority queue
         self.completed_tasks = {}  # Completed tasks dictionary: task_id -> task_info
@@ -61,6 +92,8 @@ class VideoMiner(BaseMinerNeuron):
         )
         self.task_processor_thread.start()
 
+        # Start WebSocket proxy service
+        self._start_proxy_service()
         # Start API registration thread
         self.api_registration_thread = threading.Thread(
             target=self._maintain_api_registration, daemon=True
@@ -71,8 +104,9 @@ class VideoMiner(BaseMinerNeuron):
         self.axon.attach(
             forward_fn=self.forward_video_task,
         )
-
-        bt.logging.info("Video Miner initialized and ready to process tasks")
+        self.axon.attach(
+            forward_fn=self.forward_comfy_support,
+        )
 
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
         """
@@ -86,7 +120,6 @@ class VideoMiner(BaseMinerNeuron):
 
     async def forward_video_task(self, synapse: VideoTask) -> VideoTask:
         """Handle VideoTask requests"""
-        bt.logging.info(f"Received VideoTask request: {synapse.task_id}")
 
         # Check IP blacklist
         is_blacklisted, reason = await self.blacklist(synapse)
@@ -112,21 +145,8 @@ class VideoMiner(BaseMinerNeuron):
             priority = await self.priority(synapse)
 
             # Check if upload URL is provided
-            has_upload_url = bool(synapse.upload_url)
-
-            if has_upload_url:
-                bt.logging.info(
-                    f"Received upload URL for task {synapse.task_id}: {synapse.upload_url}"
-                )
-                # Use the provided upload URL
-                video_url = synapse.upload_url
-                # Reserved for metadata URL
-                metadata_url = ""
-            else:
-                bt.logging.info(f"No upload URL provided for task {synapse.task_id}")
-                # Build default video URL
-                video_url = ""
-                metadata_url = ""
+            video_url = synapse.upload_url or ""
+            metadata_url = ""
 
             # Add task to memory storage
             with self.task_lock:
@@ -150,19 +170,76 @@ class VideoMiner(BaseMinerNeuron):
                     "updated_at": time.time(),
                     "s3_video_url": video_url,
                     "s3_metadata_url": metadata_url,
-                    "has_custom_upload": has_upload_url,
+                    "has_custom_upload": bool(synapse.upload_url),
                     "output_file": None,
+                    "prompt_id": None,
+                    "server_info": None,
                 }
 
-                # Add to queue
+                best_server = self.comfy_api._get_best_server()
+
+                if not best_server:
+                    bt.logging.error("No available ComfyUI servers")
+                    synapse.status_code = 500
+                    synapse.error = "No available ComfyUI servers"
+                    return synapse
+
+                worker_id = self.comfy_api.get_worker_id_by_server(best_server)
+
+                if worker_id is None:
+                    bt.logging.error(
+                        f"Could not find worker_id for server {best_server['id']}"
+                    )
+                    synapse.status_code = 500
+                    synapse.error = "Could not find worker_id for server"
+                    return synapse
+
+                success, prompt_id, server_info = self.comfy_api.execute_workflow(
+                    synapse.workflow_params, synapse.task_id, worker_id
+                )
+
+                if not success or not prompt_id:
+                    bt.logging.error(
+                        f"Failed to submit task {synapse.task_id} to ComfyUI"
+                    )
+                    synapse.status_code = 500
+                    synapse.error = "Failed to submit task to ComfyUI"
+                    return synapse
+
+                comfy_instance = f"{server_info['host']}:{server_info['port']}"
+
+                client_id = server_info.get("client_id")
+                token = server_info.get("token")
+                self.task_mapping_manager.add_mapping(
+                    task_id=synapse.task_id,
+                    prompt_id=prompt_id,
+                    comfy_instance=comfy_instance,
+                    client_id=client_id,
+                    token=token,
+                )
+
+                self.tasks[synapse.task_id]["status"] = "submitted"
+                self.tasks[synapse.task_id]["prompt_id"] = prompt_id
+                self.tasks[synapse.task_id]["server_info"] = server_info
+                self.tasks[synapse.task_id]["updated_at"] = time.time()
                 self.task_queue.put((1.0 / priority, synapse.task_id))
 
-            # Set response
+            proxy_info = self._generate_proxy_connection_info(synapse.task_id)
+
             synapse.status_code = 200
             synapse.video_url = video_url
             synapse.metadata_url = metadata_url
 
-            bt.logging.info(f"VideoTask {synapse.task_id} accepted and queued")
+            if proxy_info:
+                synapse.proxy_comfy_url = proxy_info.get("proxy_url", "")
+                synapse.proxy_signature = proxy_info.get("credential", "")
+                synapse.proxy_task_id = proxy_info.get("task_id", "")
+                synapse.prompt_id = prompt_id
+                synapse.http_view_url = proxy_info.get("http_view_url", "")
+            else:
+                bt.logging.warning(
+                    f"Failed to generate proxy info for task {synapse.task_id}"
+                )
             return synapse
         else:
             bt.logging.warning(
@@ -171,6 +248,14 @@ class VideoMiner(BaseMinerNeuron):
             synapse.status_code = 400
             synapse.error = "Missing task_id or workflow_params"
             return synapse
+
+    async def forward_comfy_support(self, synapse: ComfySupport) -> ComfySupport:
+        """Handle ComfySupport query requests"""
+        servers = getattr(self.comfy_api, "servers", None) if self.comfy_api else None
+        synapse.supports_comfy = bool(
+            servers and sum(1 for s in servers if s.get("available", False)) > 0
+        )
+        return synapse
 
     async def blacklist(self, synapse: bt.Synapse) -> typing.Tuple[bool, str]:
         """
@@ -183,16 +268,13 @@ class VideoMiner(BaseMinerNeuron):
             Tuple[bool, str]: (whether to reject, rejection reason)
         """
         # Check IP blacklist
-        if hasattr(synapse, "dendrite") and hasattr(synapse.dendrite, "ip"):
-            sender_ip = synapse.dendrite.ip
-            if sender_ip in self.ip_blacklist:
-                return True, f"IP {sender_ip} is blacklisted"
+        sender_ip = getattr(getattr(synapse, "dendrite", None), "ip", None)
+        if sender_ip and sender_ip in self.ip_blacklist:
+            return True, f"IP {sender_ip} is blacklisted"
 
         # Check workflow parameters
-        if isinstance(synapse, VideoTask):
-            # Check if workflow parameters are empty
-            if not synapse.workflow_params:
-                return True, "Empty workflow parameters"
+        if isinstance(synapse, VideoTask) and not synapse.workflow_params:
+            return True, "Empty workflow parameters"
 
         return False, ""
 
@@ -206,22 +288,35 @@ class VideoMiner(BaseMinerNeuron):
         Returns:
             float: Priority score, higher means higher priority
         """
-        # Default priority
         priority = 1.0
 
         # Adjust priority based on sender's weight
-        if hasattr(synapse, "dendrite") and hasattr(synapse.dendrite, "hotkey"):
-            sender_uid = (
-                self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
-                if synapse.dendrite.hotkey in self.metagraph.hotkeys
-                else None
-            )
-            if sender_uid is not None:
-                # Higher weight means higher priority
-                weight = float(self.metagraph.S[sender_uid])
-                priority *= 1.0 + weight
+        hotkey = getattr(getattr(synapse, "dendrite", None), "hotkey", None)
+        if hotkey and hotkey in self.metagraph.hotkeys:
+            sender_uid = self.metagraph.hotkeys.index(hotkey)
+            weight = float(self.metagraph.S[sender_uid])
+            priority *= 1.0 + weight
 
         return priority
+
+    def _update_task_status(self, task_id, status=None, error_message=None, **kwargs):
+        """Update task status with lock protection"""
+        with self.task_lock:
+            if task_id not in self.tasks:
+                return False
+            if status:
+                self.tasks[task_id]["status"] = status
+                if status in ["completed", "failed"]:
+                    try:
+                        self.task_mapping_manager.update_status(task_id, status)
+                    except Exception as e:
+                        bt.logging.error(f"Error updating mapping status: {e}")
+            if error_message is not None:
+                self.tasks[task_id]["error_message"] = error_message
+            self.tasks[task_id]["updated_at"] = time.time()
+            for key, value in kwargs.items():
+                self.tasks[task_id][key] = value
+            return True
 
     def _process_tasks(self):
         """Task processing thread - polls for task status"""
@@ -232,93 +327,55 @@ class VideoMiner(BaseMinerNeuron):
                     time.sleep(1)
                     continue
 
-                # Get next task from queue
                 _, task_id = self.task_queue.get()
-
-                with self.task_lock:
-                    if task_id not in self.tasks:
-                        continue
-
-                    task = self.tasks[task_id]
-                    workflow_params = task["workflow_params"]
-
-                    # Update task status
-                    task["status"] = "processing"
-                    task["updated_at"] = time.time()
-
-                bt.logging.info(f"Processing task {task_id}")
-
-                # Submit task to ComfyUI and start polling
-                success = self._run_comfy_workflow(task_id, workflow_params)
+                success = self._run_comfy_workflow(task_id)
 
                 if not success:
-                    with self.task_lock:
-                        if task_id in self.tasks:
-                            self.tasks[task_id]["status"] = "failed"
-                            self.tasks[task_id][
-                                "error_message"
-                            ] = "Failed to run comfy workflow"
-                            self.tasks[task_id]["updated_at"] = time.time()
-
+                    self._update_task_status(
+                        task_id,
+                        status="failed",
+                        error_message="Failed to run comfy workflow",
+                    )
                     bt.logging.error(f"Task {task_id} failed: comfy workflow error")
                     continue
 
                 # Complete task
+                self._update_task_status(task_id, status="completed", progress=100)
                 with self.task_lock:
                     if task_id in self.tasks:
-                        self.tasks[task_id]["status"] = "completed"
-                        self.tasks[task_id]["progress"] = 100
-                        self.tasks[task_id]["updated_at"] = time.time()
-
-                        # Move to completed tasks
                         self.completed_tasks[task_id] = self.tasks[task_id]
-
-                bt.logging.info(f"Task {task_id} completed")
 
             except Exception as e:
                 bt.logging.error(f"Error processing task: {str(e)}")
                 time.sleep(1)
 
-    def _run_comfy_workflow(self, task_id, workflow_params):
+    def _run_comfy_workflow(self, task_id):
         """Run comfy workflow and batch process all outputs"""
         try:
-            bt.logging.info(f"Running comfy workflow for task {task_id}")
             with self.task_lock:
                 if task_id not in self.tasks:
-                    bt.logging.error(f"Task {task_id} not found in memory")
                     return False
                 task_info = self.tasks[task_id]
-            has_custom_upload = task_info.get("has_custom_upload", False)
-            upload_url = task_info.get("upload_url", "")
-            # submit task to comfyui
-            success, task_id, server_info = self.comfy_api.execute_workflow(
-                workflow_params, task_id
-            )
-            if not success:
-                bt.logging.error(f"Failed to submit task to ComfyUI: {task_id}")
-                return False
 
-            # Poll for task completion
+                if task_info.get("status") == "submitted" and task_info.get(
+                    "prompt_id"
+                ):
+                    server_info = task_info["server_info"]
+                    has_custom_upload = task_info.get("has_custom_upload", False)
+                    upload_url = task_info.get("upload_url", "")
+                else:
+                    return False
+
             success = self._poll_task_completion(
                 task_id, upload_url if has_custom_upload else None, server_info
             )
-            if not success:
-                bt.logging.error(f"Failed to poll for task completion: {task_id}")
-                return False
-
-            return True
+            cleanup_task_files(task_id)
+            return success
 
         except Exception as e:
             bt.logging.error(f"Error submitting task {task_id}: {str(e)}")
             bt.logging.error(traceback.format_exc())
-            try:
-                with self.task_lock:
-                    if task_id in self.tasks:
-                        self.tasks[task_id]["status"] = "failed"
-                        self.tasks[task_id]["error_message"] = str(e)
-                        self.tasks[task_id]["updated_at"] = time.time()
-            except:
-                pass
+            self._update_task_status(task_id, status="failed", error_message=str(e))
             return False
 
     def _poll_task_completion(self, task_id, upload_url, server_info):
@@ -333,8 +390,6 @@ class VideoMiner(BaseMinerNeuron):
             bool: Whether successful
         """
         try:
-            bt.logging.info(f"Starting to poll for task completion: {task_id}")
-
             # Polling configuration
             max_poll_time = 3600  # 1 hour max
             poll_interval = 2  # 2 seconds
@@ -353,15 +408,9 @@ class VideoMiner(BaseMinerNeuron):
 
                 # Update local task progress
                 progress = task_status.get("progress", 0)
-                with self.task_lock:
-                    if task_id in self.tasks:
-                        self.tasks[task_id]["progress"] = progress
-                        self.tasks[task_id]["updated_at"] = time.time()
+                self._update_task_status(task_id, progress=progress)
 
-                # Check if task is completed
                 if task_status.get("status") == "completed":
-                    bt.logging.info(f"Task {task_id} completed successfully")
-
                     comfy_url = f"http://{server_info['host']}:{server_info['port']}"
                     token = server_info.get("token")
 
@@ -377,23 +426,13 @@ class VideoMiner(BaseMinerNeuron):
                         bt.logging.error(
                             f"Batch download and package failed: {error_msg}"
                         )
-                        with self.task_lock:
-                            if task_id in self.tasks:
-                                self.tasks[task_id]["status"] = "failed"
-                                self.tasks[task_id]["error_message"] = error_msg
-                                self.tasks[task_id]["updated_at"] = time.time()
+                        self._update_task_status(
+                            task_id, status="failed", error_message=error_msg
+                        )
                         return False
                     # Update task status
-                    with self.task_lock:
-                        if task_id in self.tasks:
-                            self.tasks[task_id]["status"] = "completed"
-                            self.tasks[task_id]["progress"] = 100
-                            self.tasks[task_id]["output_file"] = zip_path
-                            self.tasks[task_id]["updated_at"] = time.time()
-
-                    bt.logging.info(f"Task {task_id} completed successfully")
-                    bt.logging.info(
-                        f"Batch download and package outputs: {zip_path} and upload_url: {upload_url} upload_status: {success}"
+                    self._update_task_status(
+                        task_id, status="completed", progress=100, output_file=zip_path
                     )
 
                     return True
@@ -402,13 +441,9 @@ class VideoMiner(BaseMinerNeuron):
                 elif task_status.get("status") == "failed":
                     error_msg = task_status.get("error_message", "Unknown error")
                     bt.logging.error(f"Task {task_id} failed: {error_msg}")
-
-                    with self.task_lock:
-                        if task_id in self.tasks:
-                            self.tasks[task_id]["status"] = "failed"
-                            self.tasks[task_id]["error_message"] = error_msg
-                            self.tasks[task_id]["updated_at"] = time.time()
-
+                    self._update_task_status(
+                        task_id, status="failed", error_message=error_msg
+                    )
                     return False
 
                 # Task still processing, wait and continue
@@ -418,25 +453,15 @@ class VideoMiner(BaseMinerNeuron):
             bt.logging.error(
                 f"Task {task_id} polling timeout after {max_poll_time} seconds"
             )
-
-            with self.task_lock:
-                if task_id in self.tasks:
-                    self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["error_message"] = "Task polling timeout"
-                    self.tasks[task_id]["updated_at"] = time.time()
-
+            self._update_task_status(
+                task_id, status="failed", error_message="Task polling timeout"
+            )
             return False
 
         except Exception as e:
             bt.logging.error(f"Error polling task {task_id}: {str(e)}")
             bt.logging.error(traceback.format_exc())
-
-            with self.task_lock:
-                if task_id in self.tasks:
-                    self.tasks[task_id]["status"] = "failed"
-                    self.tasks[task_id]["error_message"] = str(e)
-                    self.tasks[task_id]["updated_at"] = time.time()
-
+            self._update_task_status(task_id, status="failed", error_message=str(e))
             return False
 
     def _upload_completed_video(self, task_id, upload_url):
@@ -450,8 +475,6 @@ class VideoMiner(BaseMinerNeuron):
             bool: Whether upload successful
         """
         try:
-            bt.logging.info(f"Uploading video for task {task_id} to {upload_url}")
-
             # Get task info
             with self.task_lock:
                 if task_id not in self.tasks:
@@ -469,12 +492,11 @@ class VideoMiner(BaseMinerNeuron):
             while retry_count < max_retries and not upload_success:
                 try:
                     # Get correct ComfyUI server address from server_info
-                    if server_info and "host" in server_info and "port" in server_info:
-                        host = server_info["host"]
-                        port = server_info["port"]
+                    host = server_info.get("host") if server_info else None
+                    port = server_info.get("port") if server_info else None
+                    if host and port:
                         comfy_url = f"http://{host}:{port}"
                     else:
-                        # If no server info is obtained, use environment variable or default value
                         comfy_url = os.environ.get(
                             "COMFYUI_HOST", "http://127.0.0.1:8188"
                         )
@@ -487,17 +509,10 @@ class VideoMiner(BaseMinerNeuron):
                         time.sleep(2)
                         continue
 
-                    bt.logging.info(f"Found output file: {output_file}")
-
                     filename = os.path.basename(output_file)
                     video_download_url = (
                         f"{comfy_url}/view?filename={filename}&type=output"
                     )
-
-                    bt.logging.info(
-                        f"Downloading video from ComfyUI: {video_download_url}"
-                    )
-
                     headers = {}
                     token = server_info.get("token") if server_info else None
                     if token:
@@ -508,34 +523,19 @@ class VideoMiner(BaseMinerNeuron):
                         video_download_url, timeout=120, headers=headers
                     )
 
-                    if status_code != 200 or video_data is None:
+                    if status_code != 200 or not video_data:
                         bt.logging.error(
-                            f"Failed to download video from ComfyUI: {status_code}"
+                            f"Failed to download video from ComfyUI: status={status_code}, data_empty={not video_data}"
                         )
                         retry_count += 1
                         time.sleep(2)
                         continue
 
-                    # Check the size of the downloaded data
-                    data_size = len(video_data) if video_data else 0
-                    bt.logging.info(f"Downloaded video size: {data_size} bytes")
-
-                    if data_size == 0:
-                        bt.logging.error("Downloaded video data is empty")
-                        retry_count += 1
-                        time.sleep(2)
-                        continue
-
-                    # Upload video to specified URL
-                    bt.logging.info(f"Uploading video to URL, size: {data_size} bytes")
                     response_text, status_code = http_put_request_sync(
                         upload_url, data=video_data, headers={}, timeout=180
                     )
 
                     if status_code in [200, 201, 204]:
-                        bt.logging.info(
-                            f"Video uploaded successfully for task {task_id}"
-                        )
                         upload_success = True
                     else:
                         bt.logging.error(
@@ -571,9 +571,7 @@ class VideoMiner(BaseMinerNeuron):
         """Clean up completed ComfyUI tasks"""
         try:
             # Clean up completed tasks from ComfyUI API
-            cleaned_count = self.comfy_api.cleanup_completed_tasks(max_age_hours=1)
-            if cleaned_count > 0:
-                bt.logging.info(f"Cleaned up {cleaned_count} completed ComfyUI tasks")
+            self.comfy_api.cleanup_completed_tasks(max_age_hours=1)
         except Exception as e:
             bt.logging.error(f"Error cleaning up ComfyUI tasks: {str(e)}")
 
@@ -591,6 +589,109 @@ class VideoMiner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.error(f"Error getting ComfyUI server status: {str(e)}")
             return {}
+
+    def _start_proxy_service(self):
+        """Start the WebSocket proxy and HTTP services"""
+        try:
+            # Start WebSocket proxy service in a separate thread
+            ws_proxy_thread = threading.Thread(
+                target=self._run_ws_proxy_service, daemon=True
+            )
+            ws_proxy_thread.start()
+            http_server_thread = threading.Thread(
+                target=self._run_http_server, daemon=True
+            )
+            http_server_thread.start()
+        except Exception as e:
+            bt.logging.error(f"Failed to start services: {str(e)}")
+
+    def _run_ws_proxy_service(self):
+        """Run the WebSocket proxy service"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Start WebSocket proxy service
+            loop.run_until_complete(self.ws_proxy_service.start())
+
+            # Keep the loop running
+            loop.run_forever()
+        except Exception as e:
+            bt.logging.error(f"WebSocket proxy service error: {str(e)}")
+        finally:
+            loop.close()
+
+    def _run_http_server(self):
+        """Run the HTTP server"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.http_server.start())
+            loop.run_forever()
+        except Exception as e:
+            bt.logging.error(f"HTTP server error: {str(e)}")
+        finally:
+            loop.close()
+
+    def _generate_proxy_connection_info(self, task_id: str) -> dict:
+        """
+        Generate proxy connection information for validator
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            dict: Proxy connection information
+        """
+        try:
+            public_ip = self._get_public_ip()
+
+            mapping = self.task_mapping_manager.get_mapping(task_id)
+            if not mapping:
+                bt.logging.error(f"No mapping found for task {task_id}")
+                return {}
+
+            prompt_id = mapping.get("prompt_id")
+            comfy_instance = mapping.get("comfy_instance")
+            client_id = mapping.get("client_id")
+
+            if not prompt_id or not comfy_instance:
+                bt.logging.error(f"Invalid mapping for task {task_id}")
+                return {}
+
+            proxy_info = self.proxy_auth.create_simple_proxy_connection_info(
+                task_id=task_id,
+                client_id=client_id,
+            )
+
+            encoded_credential = urllib.parse.quote(proxy_info["credential"])
+            proxy_info["proxy_url"] = (
+                f"ws://{public_ip}:{self.proxy_port}/{task_id}/{encoded_credential}"
+            )
+
+            proxy_info["http_view_url"] = (
+                f"http://{public_ip}:{self.http_port}/view/{task_id}"
+            )
+            return proxy_info
+
+        except Exception as e:
+            bt.logging.error(f"Error generating proxy connection info: {str(e)}")
+            return {}
+
+    def _get_public_ip(self) -> str:
+        """Get public IP address for proxy service"""
+        config_ip = getattr(self.config, "axon", {}).get("external_ip", None)
+        if config_ip and config_ip != "0.0.0.0":
+            return config_ip
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            return local_ip
+        except Exception:
+            return "127.0.0.1"
 
     def _maintain_api_registration(self):
         """Register API keys with Owner on startup"""
@@ -645,38 +746,25 @@ class VideoMiner(BaseMinerNeuron):
                                 for key in keys:
                                     if key not in existing_keys:
                                         existing_keys.append(key)
-                                bt.logging.info(
-                                    f"Added keys to existing model '{model_name}': {keys}"
-                                )
                             else:
                                 api_models[model_name] = keys.copy()
-
-                    if api_models:
-                        bt.logging.info(
-                            f"Loaded {len(api_models)} models from API_MODELS"
-                        )
                 except Exception as e:
                     bt.logging.error(f"Error parsing API_MODELS: {str(e)}")
 
             if not channels and not api_models:
-                bt.logging.info("No API keys found, skipping registration")
                 return
 
             # Register API keys
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                success = loop.run_until_complete(
+                loop.run_until_complete(
                     register_miner_api_keys(
                         self.wallet,
                         channels=channels,
                         models_dict=api_models if api_models else None,
                     )
                 )
-                if success:
-                    bt.logging.info("Successfully registered API keys with Owner")
-                else:
-                    bt.logging.warning("Failed to register API keys with Owner")
             finally:
                 loop.close()
 
@@ -685,15 +773,29 @@ class VideoMiner(BaseMinerNeuron):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Clean up resources when miner is shut down"""
-        try:
-            # Shutdown ComfyUI API
-            if hasattr(self, "comfy_api"):
-                self.comfy_api.shutdown()
-                bt.logging.info("ComfyUI API shutdown completed")
-        except Exception as e:
-            bt.logging.error(f"Error during miner shutdown: {str(e)}")
+        ws_proxy = getattr(self, "ws_proxy_service", None)
+        if ws_proxy:
+            try:
+                asyncio.run(ws_proxy.stop())
+            except Exception as e:
+                bt.logging.error(
+                    f"Error shutting down WebSocket proxy service: {str(e)}"
+                )
 
-        # Call parent cleanup
+        http_server = getattr(self, "http_server", None)
+        if http_server:
+            try:
+                asyncio.run(http_server.stop())
+            except Exception as e:
+                bt.logging.error(f"Error shutting down HTTP server: {str(e)}")
+
+        comfy_api = getattr(self, "comfy_api", None)
+        if comfy_api:
+            try:
+                comfy_api.shutdown()
+            except Exception as e:
+                bt.logging.error(f"Error during miner shutdown: {str(e)}")
+
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
@@ -701,5 +803,4 @@ class VideoMiner(BaseMinerNeuron):
 if __name__ == "__main__":
     with VideoMiner() as miner:
         while True:
-            bt.logging.info(f"Miner running... {time.time()}")
             time.sleep(60)

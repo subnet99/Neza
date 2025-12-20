@@ -124,7 +124,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_task_count(self):
         """Get current total task count"""
@@ -140,7 +140,7 @@ class ValidatorDatabase(DatabaseConnection):
             return 0
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_pending_tasks(self, limit=5):
         """Get pending tasks"""
@@ -171,7 +171,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_active_tasks(self):
         """Get tasks in progress"""
@@ -193,7 +193,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_completed_tasks_without_score(self, limit=10):
         """Get completed tasks without scores"""
@@ -219,7 +219,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_all_completed_tasks_without_score(self):
         """Get all completed tasks without scores, no limit"""
@@ -246,7 +246,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_miner_stats(self):
         """Get statistics for all miners"""
@@ -282,7 +282,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_miner_tasks_last_hour(self, hotkey):
         """Get number of tasks completed by a miner in the last hour"""
@@ -304,7 +304,7 @@ class ValidatorDatabase(DatabaseConnection):
             return 0
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_task_by_id(self, task_id):
         """Get task by ID"""
@@ -335,7 +335,7 @@ class ValidatorDatabase(DatabaseConnection):
             return None
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_to_processing(
         self, task_id, miner_hotkey, s3_video_url, s3_metadata_url
@@ -411,7 +411,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_retry_count(
         self, task_id, miner_hotkey=None, error_message="Unknown error"
@@ -493,7 +493,7 @@ class ValidatorDatabase(DatabaseConnection):
                     )
 
             # If retry count is too high, mark as failed
-            if retry_count >= 3:
+            if retry_count >= 2:
                 cursor.execute(
                     """
                 UPDATE tasks 
@@ -528,7 +528,7 @@ class ValidatorDatabase(DatabaseConnection):
             return 0
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_to_completed(
         self,
@@ -631,7 +631,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_to_failed(self, task_id, miner_hotkey, error_message):
         """Update task status to failed"""
@@ -723,7 +723,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_to_timeout(
         self, task_id, miner_hotkey, timeout_seconds, miner_info=None
@@ -831,7 +831,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_with_score(
         self,
@@ -948,7 +948,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_verification_failed(self, task_id, miner_hotkey):
         """Update task verification failed"""
@@ -1017,7 +1017,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def add_task(self, task_id, complete_workflow, secret_key, timeout_seconds=600):
         """Add new task"""
@@ -1063,7 +1063,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def clean_old_task_history(self, days=7):
         """Clean up old task history records"""
@@ -1090,7 +1090,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_miners_active_status(self, hours=1):
         """Update miners active status"""
@@ -1119,7 +1119,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def reset_miners_hourly_tasks(self):
         """Reset miners hourly task count"""
@@ -1139,7 +1139,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_tasks_by_miner(self, miner_hotkey, limit=50, status=None):
         """Query tasks processed by a specific miner"""
@@ -1190,7 +1190,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_tasks_by_status(self, status, limit=50):
         """Query tasks with specific status"""
@@ -1228,7 +1228,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_attempt(self, task_id, miner_hotkey):
         """Update task attempt miner information"""
@@ -1275,7 +1275,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_task_history(self, task_id):
         """Get task history records"""
@@ -1300,7 +1300,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_complete_workflow(
         self,
@@ -1376,7 +1376,7 @@ class ValidatorDatabase(DatabaseConnection):
                 if uid is None:
                     try:
                         # Get current subtensor instance
-                        subtensor = bt.subtensor()
+                        subtensor = bt.Subtensor()
 
                         # Get current metagraph
                         metagraph = subtensor.metagraph(
@@ -1445,7 +1445,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_verified_task_count(self):
         """Get verified task total"""
@@ -1466,7 +1466,7 @@ class ValidatorDatabase(DatabaseConnection):
             return 0
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_failed_verification_count(self):
         """Get failed verification task total"""
@@ -1487,7 +1487,7 @@ class ValidatorDatabase(DatabaseConnection):
             return 0
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_retry_tasks(self):
         """Get retry tasks (tasks in pending state but assigned to miner)"""
@@ -1510,7 +1510,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_tasks_for_retry(self):
         """Get tasks for retry (tasks in pending state and assigned to miner)"""
@@ -1533,7 +1533,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_new_pending_tasks(self, limit=10):
         """Get new pending tasks (tasks not assigned to miner)"""
@@ -1557,7 +1557,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_with_upload_info(
         self,
@@ -1612,7 +1612,7 @@ class ValidatorDatabase(DatabaseConnection):
                 if uid is None:
                     try:
                         # Get current subtensor instance
-                        subtensor = bt.subtensor()
+                        subtensor = bt.Subtensor()
 
                         # Get current metagraph
                         metagraph = subtensor.metagraph(
@@ -1681,7 +1681,7 @@ class ValidatorDatabase(DatabaseConnection):
 
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_miner_by_uid(self, uid):
         """Get miner by UID"""
@@ -1703,7 +1703,7 @@ class ValidatorDatabase(DatabaseConnection):
             return None
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_miner_uid(self, hotkey, uid, current_block=None):
         """Update miner UID, reset miner data if UID changes"""
@@ -1784,11 +1784,14 @@ class ValidatorDatabase(DatabaseConnection):
         except Exception as e:
             bt.logging.error(f"Error updating miner uid: {str(e)}")
             if conn:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except:
+                    pass
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def get_miners_with_creation_time(self):
         """
@@ -1823,7 +1826,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_result_urls(self, task_id, video_url, metadata_url=""):
         """
@@ -1880,7 +1883,7 @@ class ValidatorDatabase(DatabaseConnection):
 
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_last_sent_at(self, task_id, last_sent_at):
         """Update task last_sent_at timestamp"""
@@ -1912,7 +1915,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def update_task_status(self, task_id, status):
         """Update task status"""
@@ -1959,7 +1962,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def batch_update_timeout_tasks_with_scores(self, timeout_tasks):
         """Batch update timeout tasks with status and scores in one operation
@@ -2029,7 +2032,7 @@ class ValidatorDatabase(DatabaseConnection):
             return False
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
     def batch_get_tasks(self, task_ids):
         """Get multiple tasks by IDs
@@ -2070,7 +2073,7 @@ class ValidatorDatabase(DatabaseConnection):
             return []
         finally:
             if conn:
-                conn.close()
+                self.put_connection(conn)
 
 
 # Global validator database instance

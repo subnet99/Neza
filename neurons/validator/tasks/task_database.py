@@ -702,13 +702,17 @@ class TaskDatabase:
                 conn.commit()
                 return True
             except Exception as e:
-                conn.rollback()
+                if conn:
+                    conn.rollback()
                 bt.logging.error(f"Error updating task retry count: {str(e)}")
                 bt.logging.error(traceback.format_exc())
                 return False
-        finally:
-            if conn:
-                conn.close()
+            finally:
+                if conn:
+                    self.db.put_connection(conn)
+        except Exception as e:
+            bt.logging.error(f"Error in update_task_retry: {str(e)}")
+            bt.logging.error(traceback.format_exc())
             return False
 
     async def update_task_to_timeout(

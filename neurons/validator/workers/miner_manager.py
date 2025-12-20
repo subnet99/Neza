@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Set
 import random
 import bittensor as bt
 from neza.utils.http import sync_miner_api_models
+from neza.protocol import ComfySupport
 
 
 class MinerManager:
@@ -32,6 +33,9 @@ class MinerManager:
         self.miner_info_cache = {}
         self.miners_cache_ttl = self.validator.validator_config.miners_cache_ttl
         self.api_miners_cache = {}
+        self.comfy_support_miners = set()
+        self.blacklisted_hotkeys = set()
+        self.blacklisted_uids = set()
 
     def init_miners_cache(self):
         """
@@ -201,6 +205,7 @@ class MinerManager:
             metagraph = self.validator.metagraph
 
             coldkey_to_hotkeys = {}
+            coldkey_to_uids = {}
             for uid in range(len(metagraph.hotkeys)):
                 if uid == self.validator.uid:
                     continue
@@ -232,7 +237,9 @@ class MinerManager:
 
                 if coldkey not in coldkey_to_hotkeys:
                     coldkey_to_hotkeys[coldkey] = []
+                    coldkey_to_uids[coldkey] = []
                 coldkey_to_hotkeys[coldkey].append(hotkey)
+                coldkey_to_uids[coldkey].append(uid)
 
                 # Add to available miners list
                 available_miners.append(uid)
@@ -292,6 +299,7 @@ class MinerManager:
             self.miner_online = available_miners
             self.miners_cache_time = time.time()
             self.validator.score_manager.update_miner_state()
+            self._update_blacklisted_hotkeys(coldkey_to_hotkeys, coldkey_to_uids)
 
             bt.logging.info(
                 f"Updated available miners list, found {len(available_miners)} available miners Available miners UIDs: {available_miners}"
@@ -301,6 +309,42 @@ class MinerManager:
 
         except Exception as e:
             bt.logging.error(f"Error updating miners list: {str(e)}")
+            bt.logging.error(traceback.format_exc())
+
+    def _update_blacklisted_hotkeys(self, coldkey_to_hotkeys, coldkey_to_uids):
+        """
+        Update blacklisted hotkeys and UIDs cache based on coldkey blacklist
+
+        Args:
+            coldkey_to_hotkeys: Dict mapping coldkey to list of hotkeys
+            coldkey_to_uids: Dict mapping coldkey to list of UIDs
+        """
+        try:
+            blacklisted_coldkeys = set(
+                self.validator.validator_config.coldkey_blacklist_array
+            )
+            if not blacklisted_coldkeys:
+                self.blacklisted_hotkeys = set()
+                self.blacklisted_uids = set()
+                return
+
+            blacklisted_hotkeys = set()
+            blacklisted_uids = set()
+            for coldkey in blacklisted_coldkeys:
+                if coldkey in coldkey_to_hotkeys:
+                    blacklisted_hotkeys.update(coldkey_to_hotkeys[coldkey])
+                if coldkey in coldkey_to_uids:
+                    blacklisted_uids.update(coldkey_to_uids[coldkey])
+
+            self.blacklisted_hotkeys = blacklisted_hotkeys
+            self.blacklisted_uids = blacklisted_uids
+
+            if blacklisted_hotkeys:
+                bt.logging.warning(
+                    f"Blacklisted {len(blacklisted_hotkeys)} hotkeys ({len(blacklisted_uids)} UIDs) from {len(blacklisted_coldkeys)} blacklisted coldkeys"
+                )
+        except Exception as e:
+            bt.logging.error(f"Error updating blacklisted hotkeys: {str(e)}")
             bt.logging.error(traceback.format_exc())
 
     def get_stake_metrics(self):
@@ -730,3 +774,55 @@ class MinerManager:
             )
 
         return selected_miners
+
+    async def query_comfy_support(self, miner_uids: List[int]) -> Set[int]:
+        """
+        Query miners for ComfyUI support
+
+        Args:
+            miner_uids: List of miner UIDs to query
+
+        Returns:
+            Set of UIDs that support ComfyUI
+        """
+        if not miner_uids:
+            return set()
+
+        comfy_supporters = set()
+        axons = [self.validator.metagraph.axons[uid] for uid in miner_uids]
+
+        try:
+            async with bt.Dendrite(self.validator.wallet) as dendrite:
+                responses = await asyncio.wait_for(
+                    dendrite.forward(
+                        axons=axons,
+                        synapse=ComfySupport(),
+                        deserialize=True,
+                        timeout=5,
+                    ),
+                    timeout=10,
+                )
+
+                for i, response in enumerate(responses):
+                    if i >= len(miner_uids):
+                        break
+                    uid = miner_uids[i]
+                    if response and getattr(response, "supports_comfy", False):
+                        comfy_supporters.add(uid)
+
+                bt.logging.debug(f"Miners {sorted(comfy_supporters)} support ComfyUI")
+
+        except Exception as e:
+            bt.logging.error(f"Error querying comfy support: {str(e)}")
+
+        return comfy_supporters
+
+    def get_comfy_support_miners(self) -> List[int]:
+        """
+        Get list of miners that support ComfyUI
+
+        Returns:
+            List of miner UIDs that support ComfyUI
+        """
+        available = self.get_available_miners_cache()
+        return [uid for uid in available if uid in self.comfy_support_miners]

@@ -35,6 +35,15 @@ chmod +x ./scripts/setup_comfyui.sh
 
 **Note**: You can run multiple ComfyUI instances on different GPU servers and configure them in the environment variables.
 
+- Install ComfyUI-Manager and required custom nodes and models:
+
+```bash
+chmod +x ./scripts/setup_comfyui_manager.sh
+./scripts/setup_comfyui_manager.sh
+```
+
+**Note**: This script will install `ComfyUI-Manager` and automatically download all necessary custom nodes and models. Due to environmental factors (e.g., GPU, Python version, dependency support), the installation success rate may vary. Please **verify that ComfyUI starts normally** and all custom nodes and models are loaded before proceeding.
+
 ### Clone Repository
 
 ```bash

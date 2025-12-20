@@ -3,6 +3,7 @@ import numpy as np
 import asyncio
 import argparse
 import threading
+import time
 import bittensor as bt
 from datetime import datetime, timedelta
 
@@ -37,7 +38,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
         # Dendrite lets us send messages to other nodes (axons) in the network.
-        self.dendrite = bt.dendrite(wallet=self.wallet)
+        self.dendrite = bt.Dendrite(wallet=self.wallet)
 
         bt.logging.info(f"Dendrite: {self.dendrite}")
 
@@ -109,7 +110,7 @@ class BaseValidatorNeuron(BaseNeuron):
 
         bt.logging.info("serving ip to chain...")
         try:
-            self.axon = bt.axon(wallet=self.wallet, config=self.config)
+            self.axon = bt.Axon(wallet=self.wallet, config=self.config)
 
             try:
                 self.subtensor.serve_axon(
@@ -162,7 +163,13 @@ class BaseValidatorNeuron(BaseNeuron):
         # This loop maintains the validator's operations until intentionally stopped.
         try:
             while True:
-                bt.logging.info(f"step({self.step}) block({self.block})")
+                try:
+                    current_block = self.block
+                    bt.logging.info(f"step({self.step}) block({current_block})")
+                except Exception as e:
+                    bt.logging.error("Failed to get current block")
+                    time.sleep(10)
+                    continue
 
                 # Check if the substrate thread is still alive
                 if (

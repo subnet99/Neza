@@ -220,6 +220,10 @@ class VideoManager:
                     continue
 
                 for output_type, file_list in node_output.items():
+
+                    if output_type == "text":
+                        continue
+
                     if file_types and output_type not in file_types:
                         continue
 

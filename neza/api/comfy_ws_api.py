@@ -25,6 +25,7 @@ class ComfyWSAPI:
         """
         self.servers = []
         self.ws_managers = {}  # WebSocket managers for each server
+        self.message_callbacks = []  # List of message callback functions
         self.server_tasks = {}  # Task queue for each server: server_id -> [task_info]
         self.server_queue_prompt_ids = {}
         self.running = False
@@ -54,6 +55,7 @@ class ComfyWSAPI:
                         "id": server_id,
                         "host": host,
                         "port": port,
+                        "token": server.get("token"),  # Store token if available
                         "client_id": str(uuid.uuid4()),
                         "available": False,  # Whether server is available
                         "ws_connected": False,  # Whether WebSocket is connected
@@ -78,6 +80,22 @@ class ComfyWSAPI:
             target=self._process_tasks, daemon=True
         )
         self.task_processor_thread.start()
+
+    def add_message_callback(self, callback_func):
+        """
+        Add a message callback function
+
+        Args:
+            callback_func: Function that takes (message: str, server_id: str) as parameters
+        """
+        self.message_callbacks.append(callback_func)
+        bt.logging.info("Message callback added")
+
+    def remove_message_callback(self, callback_func):
+        """Remove a message callback function"""
+        if callback_func in self.message_callbacks:
+            self.message_callbacks.remove(callback_func)
+            bt.logging.info("Message callback removed")
 
     def _check_server_availability(
         self, server: Dict[str, Any], clear_queue: bool = False
@@ -129,7 +147,6 @@ class ComfyWSAPI:
 
             ws_url = f"{host_for_ws}:{server['port']}/ws?clientId={server['client_id']}"
 
-            # Prepare headers for WebSocket connection
             headers = {}
             if server.get("token"):
                 headers["Authorization"] = f"Bearer {server['token']}"
@@ -166,36 +183,44 @@ class ComfyWSAPI:
     ) -> None:
         """Handle WebSocket message from WebSocketManager"""
         try:
+            for callback in self.message_callbacks:
+                try:
+                    callback(message, server_id)
+                except Exception as e:
+                    bt.logging.error(f"Error in message callback: {str(e)}")
+
             data = json.loads(message)
             message_type = data.get("type")
+            msg_data = data.get("data", {})
 
             # Find server by server_id
             server = next((s for s in self.servers if s["id"] == server_id), None)
             if not server:
                 return
+
             if message_type == "status":
                 self._check_tasks_in_queue(data, server)
                 return
+
+            # Dispatch based on message_type
             if message_type == "progress_state":
-                # Use WebSocket throttled handler for progress_state messages
-                prompt_id = data.get("data", {}).get("prompt_id")
+                prompt_id = msg_data.get("prompt_id")
                 if prompt_id:
-                    throttled_key = f"progress_state_{prompt_id}"
                     throttler.handle(
-                        throttled_key,
-                        (data.get("data", {}), server),
+                        f"progress_state_{prompt_id}",
+                        (msg_data, server),
                         self._handle_progress_state_throttled,
                     )
             elif message_type == "execution_cached":
-                self._handle_execution_cached(data.get("data", {}), server)
+                self._handle_execution_cached(msg_data, server)
             elif message_type == "execution_start":
-                self._handle_execution_start(data.get("data", {}), server)
+                self._handle_execution_start(msg_data, server)
             elif message_type == "execution_success":
-                self._handle_execution_success(data.get("data", {}), server)
+                self._handle_execution_success(msg_data, server)
             elif message_type == "execution_error":
-                self._handle_execution_error(data.get("data", {}), server)
+                self._handle_execution_error(msg_data, server)
             elif message_type == "progress":
-                self._handle_progress(data.get("data", {}), server)
+                self._handle_progress(msg_data, server)
 
         except Exception as e:
             bt.logging.error(
@@ -263,6 +288,9 @@ class ComfyWSAPI:
             if not task:
                 return
 
+            if self._is_task_finished(task):
+                return
+
             # Initialize node tracking if not exists
             if "node_progress" not in task:
                 task["node_progress"] = {}
@@ -295,10 +323,6 @@ class ComfyWSAPI:
 
             task["running_nodes"] = running_nodes
             task["running_progresses"] = running_progresses
-
-            bt.logging.info(
-                f"Task {task['task_id']}: running_nodes: {running_nodes} running_progresses: {running_progresses}"
-            )
 
         except Exception as e:
             bt.logging.error(f"Error handling progress_state: {str(e)}")
@@ -333,6 +357,9 @@ class ComfyWSAPI:
             if not task:
                 return
 
+            if self._is_task_finished(task):
+                return
+
             # Initialize node tracking if not exists
             if "node_progress" not in task:
                 task["node_progress"] = {}
@@ -353,6 +380,8 @@ class ComfyWSAPI:
             if prompt_id:
                 task = self._find_task_by_prompt_id(prompt_id, server["id"])
                 if task:
+                    if self._is_task_finished(task):
+                        return
                     task["status"] = "running"
                     bt.logging.info(f"Task {task['task_id']} started execution")
 
@@ -368,6 +397,8 @@ class ComfyWSAPI:
             if prompt_id:
                 task = self._find_task_by_prompt_id(prompt_id, server["id"])
                 if task:
+                    if self._is_task_finished(task):
+                        return
                     # Task is completed when we receive execution_success
                     bt.logging.info(
                         f"Task {task['task_id']} completed successfully (execution_success received)"
@@ -405,6 +436,8 @@ class ComfyWSAPI:
             if prompt_id:
                 task = self._find_task_by_prompt_id(prompt_id, server["id"])
                 if task:
+                    if self._is_task_finished(task):
+                        return
                     self._complete_task(
                         task["task_id"], server["id"], False, error_message
                     )
@@ -483,6 +516,11 @@ class ComfyWSAPI:
             if task.get("prompt_id") == prompt_id:
                 return task
         return None
+
+    def _is_task_finished(self, task: Dict[str, Any]) -> bool:
+        """Check if task is finished"""
+        status = task.get("status", "")
+        return status in ["completed", "failed"]
 
     def _complete_task(
         self,
@@ -596,6 +634,35 @@ class ComfyWSAPI:
             )
             return float("inf")
 
+    def cleanup_completed_tasks(self, max_age_hours: int = 1) -> int:
+        """
+        Clean up completed tasks from server_tasks
+
+        Args:
+            max_age_hours: Maximum age of completed tasks in hours
+
+        Returns:
+            int: Number of cleaned tasks
+        """
+        cleaned_count = 0
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+
+        for server_id in list(self.server_tasks.keys()):
+            tasks = self.server_tasks[server_id]
+            original_count = len(tasks)
+            self.server_tasks[server_id] = [
+                task
+                for task in tasks
+                if not (
+                    self._is_task_finished(task)
+                    and (current_time - task.get("completed_at", 0) > max_age_seconds)
+                )
+            ]
+            cleaned_count += original_count - len(self.server_tasks[server_id])
+
+        return cleaned_count
+
     def _get_best_server(self) -> Optional[Dict[str, Any]]:
         """
         Get server with lowest load
@@ -625,6 +692,21 @@ class ComfyWSAPI:
         )
 
         return best_server
+
+    def get_worker_id_by_server(self, server: Dict[str, Any]) -> Optional[int]:
+        """
+        Get worker_id (index) for a given server object
+
+        Args:
+            server: Server object to find worker_id for
+
+        Returns:
+            Optional[int]: Worker ID (index) if found, None otherwise
+        """
+        for i, s in enumerate(self.servers):
+            if s["id"] == server["id"]:
+                return i
+        return None
 
     def _process_tasks(self):
         """
@@ -660,17 +742,18 @@ class ComfyWSAPI:
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
 
-            # Submit workflow to ComfyUI
             headers = {}
             if server.get("token"):
                 headers["Authorization"] = f"Bearer {server['token']}"
 
+            # Submit workflow to ComfyUI
             response = requests.post(
                 f"{host_for_http}:{server['port']}/prompt",
                 headers=headers,
                 json={
                     "prompt": task["workflow_params"],
                     "client_id": server["client_id"],
+                    **({"prompt_id": task["task_id"]} if "task_id" in task else {}),
                 },
                 timeout=30,
             )
@@ -740,8 +823,75 @@ class ComfyWSAPI:
         except Exception as e:
             bt.logging.error(f"Error initializing nodes from workflow: {str(e)}")
 
-    def execute_workflow(
+    def submit_workflow_sync(
         self, workflow: Dict[str, Any], task_id: str = None
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Submit ComfyUI workflow synchronously and store in server_tasks
+
+        Args:
+            workflow: Complete workflow configuration
+            task_id: Task ID, used for logging
+
+        Returns:
+            Tuple[bool, str, Dict[str, Any]]: (success, prompt_id, server_info)
+        """
+        try:
+            server = self._get_best_server()
+            if server is None:
+                bt.logging.error("No available ComfyUI servers")
+                return False, "", None
+
+            server_info = {
+                "host": server["host"],
+                "port": server["port"],
+                "id": server["id"],
+                "token": server.get("token"),
+            }
+
+            if not server["available"]:
+                bt.logging.warning(
+                    f"Server ****:{server['port']} not available, checking availability"
+                )
+                self._check_server_availability(server)
+                if not server["available"]:
+                    bt.logging.error(
+                        f"Server ****:{server['port']} is still not available"
+                    )
+                    return False, "", server_info
+
+            task_info = {
+                "task_id": task_id or str(uuid.uuid4()),
+                "workflow_params": workflow,
+                "status": "pending",
+                "error_message": "",
+                "execution_time": 0,
+                "created_at": time.time(),
+                "server_id": server["id"],
+            }
+
+            self._submit_task_to_server(task_info, server)
+
+            if task_info["status"] == "submitted" and task_info.get("prompt_id"):
+                self.server_tasks[server["id"]].append(task_info)
+
+                bt.logging.info(
+                    f"Task {task_info['task_id']} submitted to server ****:{server['port']} with prompt_id {task_info['prompt_id']}"
+                )
+
+                return True, task_info["prompt_id"], server_info
+            else:
+                bt.logging.error(
+                    f"Task {task_info['task_id']} submission failed: {task_info.get('error_message', 'Unknown error')}"
+                )
+                return False, "", server_info
+
+        except Exception as e:
+            bt.logging.error(f"Error submitting workflow: {str(e)}")
+            return False, "", None
+
+    def execute_workflow(
+        self, workflow: Dict[str, Any], task_id: str = None, worker_id: int = None
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Execute ComfyUI workflow with WebSocket monitoring
@@ -749,12 +899,13 @@ class ComfyWSAPI:
         Args:
             workflow: Complete workflow configuration
             task_id: Task ID, used for logging
+            worker_id: Worker ID, used for logging
 
         Returns:
             Tuple[bool, str, Dict[str, Any]]
         """
 
-        return self.execute_workflow_on_server(workflow, task_id, None)
+        return self.execute_workflow_on_server(workflow, task_id, worker_id)
 
     def execute_workflow_on_server(
         self,
@@ -784,6 +935,7 @@ class ComfyWSAPI:
             "host": server["host"],
             "port": server["port"],
             "id": server["id"],
+            "client_id": server.get("client_id"),
             "token": server.get("token"),
         }
 
@@ -1021,6 +1173,7 @@ class ComfyWSAPI:
                 "id": server["id"],
                 "host": server["host"],
                 "port": server["port"],
+                "token": server.get("token"),
                 "available": server["available"],
                 "ws_connected": self.is_server_connected(server_id),
                 "task_count": len(self.server_tasks.get(server_id, [])),
@@ -1050,6 +1203,10 @@ class ComfyWSAPI:
             host_for_http = server_info["host"]
             if not host_for_http.startswith(("http://", "https://")):
                 host_for_http = f"http://{host_for_http}"
+
+            headers = {}
+            if server_info.get("token"):
+                headers["Authorization"] = f"Bearer {server_info['token']}"
 
             # Add timeout setting
             headers = {}

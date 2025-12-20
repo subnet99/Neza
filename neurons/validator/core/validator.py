@@ -63,6 +63,8 @@ class VideoValidator(BaseValidatorNeuron):
         self.miner_manager.init_miners_cache()
         self.score_manager.initialize()
 
+        self.initial_query_comfy_support()
+
         # Initialize miner info cache
         self.miner_info_cache = None
 
@@ -75,12 +77,10 @@ class VideoValidator(BaseValidatorNeuron):
             if os.getenv("WANDB_API_KEY"):
                 self.new_wandb_run()
             else:
-                bt.logging.exception(
+                bt.logging.warning(
                     "WANDB_API_KEY not found in environment variables, skipping wandb run"
                 )
                 self.config.wandb.off = True
-        else:
-            bt.logging.warning("WANDB is disabled, skipping wandb run")
 
         # Register block callbacks
         self.register_block_callback(self.miner_manager.update_miners_on_block)
@@ -89,6 +89,7 @@ class VideoValidator(BaseValidatorNeuron):
         self.register_block_callback(self.move_scores_on_interval)
         self.register_block_callback(self.task_manager.process_tasks_on_block)
         self.register_block_callback(self.video_manager.process_tasks_on_block)
+        self.register_block_callback(self.query_comfy_support_on_block)
 
         # Set API validator instance
         try:
@@ -233,14 +234,26 @@ class VideoValidator(BaseValidatorNeuron):
                 not comfy_servers or self.score_manager.should_use_consensus_only()
             )
 
-            base_ratio = 0 if use_consensus_only else 0.5
-            consensus_ratio = 1.0 if use_consensus_only else 0.5
+            consensus_ratio_config = self.validator_config.score_manager[
+                "consensus_score_ratio"
+            ]
+            local_ratio_config = self.validator_config.score_manager[
+                "local_score_ratio"
+            ]
+
+            base_ratio = 0 if use_consensus_only else local_ratio_config
+            consensus_ratio = 1.0 if use_consensus_only else consensus_ratio_config
 
             for uid, value in enumerate(consensus_scores_array):
                 try:
                     if uid not in available_miners:
                         adjusted_scores[uid] = 0.0
                         continue
+
+                    if uid in self.miner_manager.blacklisted_uids:
+                        adjusted_scores[uid] = 0.0
+                        continue
+
                     if uid < len_score:
                         adjusted_scores[uid] = (
                             value * consensus_ratio + self.scores[uid] * base_ratio
@@ -686,3 +699,71 @@ class VideoValidator(BaseValidatorNeuron):
 
         log_path = os.path.join(self.wandb_run.dir, "output.log")
         self.wandb_run.save(log_path, base_path=self.wandb_run.dir)
+
+    def initial_query_comfy_support(self):
+        """
+        Query miners for ComfyUI support on initialization
+        """
+        try:
+            available_miners = self.miner_manager.get_available_miners_cache()
+            if available_miners:
+                thread = threading.Thread(
+                    target=self._query_comfy_support_in_thread,
+                    args=(available_miners,),
+                    daemon=True,
+                )
+                thread.start()
+                bt.logging.info("Started initial comfy support query")
+        except Exception as e:
+            bt.logging.error(f"Error starting initial comfy support query: {e}")
+
+    def query_comfy_support_on_block(self, block):
+        """
+        Query miners for ComfyUI support every 100 blocks
+
+        Args:
+            block: Current block number
+        """
+        if block % 100 != 0:
+            return
+
+        try:
+            available_miners = self.miner_manager.get_available_miners_cache()
+            if not available_miners:
+                return
+
+            thread = threading.Thread(
+                target=self._query_comfy_support_in_thread,
+                args=(available_miners,),
+                daemon=True,
+            )
+            thread.start()
+        except Exception as e:
+            bt.logging.error(f"Error starting comfy support query: {str(e)}")
+
+    def _query_comfy_support_in_thread(self, miner_uids):
+        """
+        Query comfy support in a separate thread
+        """
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                comfy_supporters = loop.run_until_complete(
+                    self.miner_manager.query_comfy_support(miner_uids)
+                )
+
+                self.score_manager.clear_task_scores_for_non_comfy_miners(
+                    comfy_supporters
+                )
+
+                self.miner_manager.comfy_support_miners = comfy_supporters
+                bt.logging.info(
+                    f"Found {len(comfy_supporters)} miners supporting ComfyUI: {sorted(comfy_supporters)}"
+                )
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+        except Exception as e:
+            bt.logging.error(f"Error querying comfy support in thread: {str(e)}")
+            bt.logging.error(traceback.format_exc())

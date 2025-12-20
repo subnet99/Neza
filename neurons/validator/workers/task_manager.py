@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 import bittensor as bt
 
 # Import protocol types
-from neza.protocol import VideoGenerationTask, TaskStatusCheck, VideoTask
+from neza.protocol import VideoTask
 
 # Import HTTP utilities
 from neza.utils.http import (
@@ -23,8 +23,7 @@ from neza.utils.http import (
     get_result_upload_urls,
     http_put_request_sync,
     request_upload_url,
-    request_upload_url,
-    request_upload_url,
+    update_progress_config,
     get_online_task_count,
     listen_for_api_tasks,
 )
@@ -96,7 +95,6 @@ class TaskManager:
         # Block is already the block number (integer)
         block_number = block
 
-        # Only process tasks every 5 blocks (approximately every 60 seconds)
         if block_number % 5 == 0:
             bt.logging.info(f"Processing tasks on block {block_number}")
             if self.validator.miner_info_cache is None:
@@ -567,7 +565,7 @@ class TaskManager:
     async def _select_miners_by_task_density(self, miners_with_capacity, task_count):
         """
         Selects miners for tasks based on task density
-        Similar to verification density but for task assignment
+        Prioritizes ComfyUI-supporting miners and distributes tasks evenly
 
         Args:
             miners_with_capacity: List of miners with capacity info
@@ -589,40 +587,44 @@ class TaskManager:
         if not valid_miners:
             return []
 
+        # Get ComfyUI-supporting miners
+        comfy_miners = self.validator.miner_manager.get_comfy_support_miners()
+        comfy_uids = set(comfy_miners)
+
+        comfy_valid = [m for m in valid_miners if m["uid"] in comfy_uids]
+        non_comfy_valid = [m for m in valid_miners if m["uid"] not in comfy_uids]
+
+        candidate_miners = comfy_valid if comfy_valid else non_comfy_valid
+
+        if not candidate_miners:
+            return []
+
         # Calculate task density for each miner based on sended_miners
         miners_with_density = []
-        for miner in valid_miners:
+        for miner in candidate_miners:
             hotkey = miner["hotkey"]
+            task_sent_count = self.sended_miners.get(hotkey, 0)
+            density = task_sent_count
 
-            # Get task count for this miner in current cycle, default to 0 if not found
-            task_count = self.sended_miners.get(hotkey, 0)
-
-            # Calculate density (similar to verification density)
-            # Lower task count = lower density = higher priority
-            density = task_count  # Simple density based on number of tasks sent in current cycle
-
-            # Get float ratio from config
             float_ratio = self.validator.validator_config.miner_selection[
                 "density_float_ratio"
             ]
-
-            # Calculate float range
-            float_range = max(
-                0.001, density * float_ratio
-            )  # Ensure minimum float range
-
-            # Apply random float within range
+            float_range = max(0.001, density * float_ratio)
             random_factor = random.uniform(1.0 - float_range, 1.0 + float_range)
             density = density * random_factor
 
-            # Add to miners with density
             miners_with_density.append({**miner, "density": density})
 
-        # Sort miners by density (ascending) to prioritize miners with lower density
+        # Sort miners by density
         sorted_miners = sorted(miners_with_density, key=lambda m: m.get("density", 0))
 
         # Select top miners
         selected_miners = sorted_miners[:count]
+
+        if comfy_valid:
+            bt.logging.info(
+                f"Selected {len(selected_miners)} ComfyUI-supporting miners from {len(comfy_valid)} available"
+            )
 
         return selected_miners
 
@@ -694,10 +696,6 @@ class TaskManager:
                 f"Sending task {task_id} to miner {miner_hotkey[:10] if miner_hotkey else 'None'}... axon {axon}"
             )
 
-            # Record task preparation time
-            prep_time = time.time() - start_time
-            bt.logging.info(f"Task preparation completed in {prep_time:.2f} seconds")
-
             task_obj = VideoTask(
                 task_id=task_id,
                 file_name=file_name,
@@ -727,12 +725,10 @@ class TaskManager:
         """
         Send task to miner
         """
-
         try:
-            # Use async context manager to handle Dendrite session
-            async with bt.dendrite(self.validator.wallet) as dendrite:
+            response = None
+            async with bt.Dendrite(self.validator.wallet) as dendrite:
                 try:
-                    # Send task with timeout
                     response = await asyncio.wait_for(
                         dendrite.forward(
                             axon,
@@ -744,7 +740,6 @@ class TaskManager:
                         ),  # Max 20 second timeout for initial response
                     )
 
-                    # Log response details
                     bt.logging.info(
                         f"Task {task_id} response from miner {miner_hotkey[:10] if miner_hotkey else 'None'}"
                     )
@@ -756,9 +751,35 @@ class TaskManager:
                     bt.logging.error(f"Error sending task: {str(e)}")
                     bt.logging.error(traceback.format_exc())
 
-            isResponse = (
-                hasattr(response, "status_code") and response.status_code == 200
+            isResponse = response and response.status_code == 200
+
+            isTaskAssigned = (
+                isResponse
+                and response.proxy_comfy_url
+                and response.proxy_signature
+                and response.http_view_url
             )
+
+            if isResponse:
+                try:
+                    proxy_config = {
+                        "proxy_comfy_url": response.proxy_comfy_url,
+                        "proxy_signature": response.proxy_signature,
+                        "proxy_task_id": response.proxy_task_id,
+                        "miner_hotkey": miner_hotkey,
+                        "http_view_url": response.http_view_url,
+                        "prompt_id": response.prompt_id,
+                    }
+
+                    await update_progress_config(
+                        self.validator.wallet, task_id, proxy_config
+                    )
+
+                except Exception as e:
+                    bt.logging.error(
+                        f"Error reporting proxy info for task {task_id}: {str(e)}"
+                    )
+                    bt.logging.error(traceback.format_exc())
 
             await self._db_op(
                 self.db.update_task_with_upload_info,
@@ -767,13 +788,11 @@ class TaskManager:
                 preview_url=(
                     task_obj.preview_url
                     if task_obj.preview_url
-                    else response.video_url if isResponse else ""
+                    else response.video_url if isTaskAssigned else ""
                 ),
-                status=("processing" if isResponse else "assigned"),
+                status=("processing" if isTaskAssigned else "assigned"),
                 miner_info=self.validator.miner_info_cache,
-                upload_url=(
-                    task_obj.upload_url if hasattr(task_obj, "upload_url") else ""
-                ),
+                upload_url=getattr(task_obj, "upload_url", ""),
             )
 
             current_time = time.time()
@@ -803,7 +822,7 @@ class TaskManager:
             bt.logging.info(
                 f"Task {task_id} assigned to miner {miner_hotkey[:10] if miner_hotkey else 'None'}..."
             )
-            return isResponse
+            return isTaskAssigned
 
         except Exception as e:
             bt.logging.error(f"Error in _send_task: {str(e)}")
@@ -877,7 +896,6 @@ class TaskManager:
 
             # Batch process timed out tasks
             if timed_out_tasks:
-                bt.logging.info(f"Processing {len(timed_out_tasks)} timed out tasks")
                 await self._batch_handle_timeout_tasks(timed_out_tasks)
 
             # Batch check URL availability for valid tasks
@@ -1020,7 +1038,6 @@ class TaskManager:
 
             # Batch process completed tasks
             if completed_tasks:
-                bt.logging.info(f"Processing {len(completed_tasks)} completed tasks")
                 await self._batch_process_completed_tasks(completed_tasks)
 
             # Log still processing tasks
@@ -1181,8 +1198,6 @@ class TaskManager:
                 *download_and_upload_tasks, return_exceptions=True
             )
 
-            bt.logging.info(f"Background downloads and uploads completed: {results}")
-
         except Exception as e:
             bt.logging.error(f"Error in async download/upload processing: {str(e)}")
             bt.logging.error(traceback.format_exc())
@@ -1264,7 +1279,6 @@ class TaskManager:
             )
 
             if not all_completed_tasks:
-                bt.logging.info("No completed tasks found for verification")
                 return
 
             bt.logging.info(

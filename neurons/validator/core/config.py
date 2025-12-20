@@ -43,6 +43,8 @@ class ValidatorConfig:
 
         self.comfy_servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
 
+        self.coldkey_blacklist = ""
+
         # Verification configuration
         self.verification = {
             "max_concurrent_verifications": max(
@@ -91,3 +93,15 @@ class ValidatorConfig:
         bt.logging.info(
             f"Validator configuration initialized with {self.verification['max_concurrent_verifications']} verification workers"
         )
+
+    @property
+    def coldkey_blacklist_array(self):
+        try:
+            if not self.coldkey_blacklist:
+                return []
+            return [
+                ck.strip() for ck in self.coldkey_blacklist.split(",") if ck.strip()
+            ]
+        except Exception as e:
+            bt.logging.error(f"Error getting coldkey blacklist array: {str(e)}")
+            return []

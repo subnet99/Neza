@@ -191,6 +191,56 @@ def generate_signature_message(body, exclude_fields=None):
     return "&".join(f"{key}={format_value(value)}" for key, value in sorted_items)
 
 
+async def update_progress_config(validator_wallet, task_id, proxy_config):
+    """
+    Update progress config with proxy information
+
+    Args:
+        validator_wallet: Validator wallet
+        task_id: Task ID
+        proxy_config: Dictionary containing proxy connection information
+
+    Returns:
+        dict: Response from owner server, or None if failed
+    """
+    try:
+        owner_host = os.environ.get("OWNER_HOST", "")
+        timestamp = int(time.time())
+        body = {
+            "validator_hotkey": validator_wallet.hotkey.ss58_address,
+            "timestamp": timestamp,
+            "task_id": task_id,
+            "config": proxy_config,
+        }
+
+        exclude_fields = ["validator_signature"]
+        message = generate_signature_message(body, exclude_fields)
+
+        signature = validator_wallet.hotkey.sign(message.encode("utf-8")).hex()
+
+        body["validator_signature"] = signature
+
+        url = f"{owner_host}/v1/validator/update-progress-config"
+
+        bt.logging.info(f"Updating progress config for task {task_id} with proxy info")
+
+        result = await http_post_request(
+            url=url,
+            json_data=body,
+            timeout=30,
+            json_response=True,
+        )
+
+        if result:
+            bt.logging.info(f"updating progress response: {result}")
+
+        return True
+
+    except Exception as e:
+        bt.logging.error(f"Error updating progress config: {str(e)}")
+        return None
+
+
 async def request_upload_url(validator_wallet, task_id=None):
     """
     Request upload URL and keys
@@ -272,7 +322,9 @@ async def get_result_upload_urls(validator_wallet, task_id, outputs_info):
             "outputs": outputs_info,
         }
 
-        message = generate_signature_message(body)
+        exclude_fields = ["validator_signature"]
+        message = generate_signature_message(body, exclude_fields)
+
         signature = validator_wallet.hotkey.sign(message.encode()).hex()
         body["validator_signature"] = signature
 
@@ -793,7 +845,11 @@ def get_consensus_scores_sync():
 
 
 def batch_download_outputs(
-    outputs: dict, comfy_url: str, out_dir: str, timeout: int = 120, token: str = None
+    outputs: dict,
+    comfy_url: str,
+    out_dir: str,
+    timeout: int = 120,
+    token: str = None,
 ) -> list[str]:
     """
     Batch download all output files from ComfyUI, rename by node
@@ -812,11 +868,12 @@ def batch_download_outputs(
                         continue
                     filename = fileinfo.get("filename")
                     file_type = fileinfo.get("type")
-                    subfolder = fileinfo.get("subfolder")
+                    subfolder = fileinfo.get("subfolder") or ""
                     if not filename:
                         continue
 
-                    file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={urllib.parse.quote(subfolder)}"
+                    subfolder_param = urllib.parse.quote(subfolder) if subfolder else ""
+                    file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={subfolder_param}"
                     headers = {}
                     if token:
                         headers["Authorization"] = f"Bearer {token}"
@@ -922,12 +979,14 @@ def batch_download_and_package_outputs(
             with open(zip_path, "rb") as f:
                 data = f.read()
 
+            upload_success = False
             for attempt in range(3):
                 resp_text, status_code = http_put_request_sync(
                     upload_url, data=data, headers={}, timeout=180
                 )
                 if status_code in [200, 201, 204]:
                     bt.logging.info(f"Zip uploaded successfully for task {task_id}")
+                    upload_success = True
                     break
                 else:
                     bt.logging.error(
@@ -935,8 +994,11 @@ def batch_download_and_package_outputs(
                     )
                     if attempt < 2:
                         time.sleep(5)
-            else:
-                bt.logging.error(f"Failed to upload zip after 3 attempts")
+
+            if not upload_success:
+                error_msg = f"Failed to upload zip after 3 attempts for task {task_id}"
+                bt.logging.error(error_msg)
+                return False, zip_path, error_msg
 
         return True, zip_path, ""
 

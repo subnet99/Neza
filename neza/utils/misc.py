@@ -8,6 +8,7 @@ import bittensor as bt
 import ffmpeg
 import threading
 import traceback
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 
 # LRU Cache with TTL
@@ -75,6 +76,25 @@ def _ttl_hash_gen(seconds: int):
         yield floor((time.time() - start_time) / seconds)
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
+def _get_current_block_with_retry(self) -> int:
+    """Get current block with retry and auto-reconnect on errors."""
+    try:
+        lock = getattr(self, "_subtensor_lock", None)
+        if lock:
+            with lock:
+                return self.subtensor.get_current_block()
+        return self.subtensor.get_current_block()
+    except Exception:
+        bt.logging.warning("Recreating subtensor connection")
+        self.subtensor = bt.subtensor(config=self.config)
+        raise
+
+
 # 12 seconds updating block.
 @ttl_cache(maxsize=1, ttl=12)
 def ttl_get_block(self) -> int:
@@ -95,13 +115,7 @@ def ttl_get_block(self) -> int:
 
     Note: self here is the miner or validator instance
     """
-    # Use lock to prevent concurrent WebSocket access
-    if hasattr(self, "_subtensor_lock") and self._subtensor_lock is not None:
-        with self._subtensor_lock:
-            result = self.subtensor.get_current_block()
-            return result
-    else:
-        return self.subtensor.get_current_block()
+    return _get_current_block_with_retry(self)
 
 
 def copy_audio_wav(video_path: str, output_wav: str) -> bool:
