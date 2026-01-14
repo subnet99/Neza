@@ -15,7 +15,13 @@ class ComfyWSAPI:
     Simplified design without callbacks, using polling-based approach
     """
 
-    def __init__(self, servers: List[Dict[str, str]] = None, clear_queue=False):
+    def __init__(
+        self,
+        servers: List[Dict[str, str]] = None,
+        client_id: str = None,
+        uid: int = None,
+        clear_queue=False,
+    ):
         """
         Initialize ComfyWSAPIEnhanced class
 
@@ -29,6 +35,8 @@ class ComfyWSAPI:
         self.server_tasks = {}  # Task queue for each server: server_id -> [task_info]
         self.server_queue_prompt_ids = {}
         self.running = False
+        self.client_id = client_id or str(uuid.uuid4())
+        self.uid = uid
 
         if servers:
             # Process each server configuration
@@ -55,11 +63,10 @@ class ComfyWSAPI:
                         "id": server_id,
                         "host": host,
                         "port": port,
-                        "token": server.get("token"),  # Store token if available
-                        "client_id": str(uuid.uuid4()),
-                        "available": False,  # Whether server is available
-                        "ws_connected": False,  # Whether WebSocket is connected
-                        "token": server.get("token"),  # Store token if available
+                        "token": server.get("token"),
+                        "client_id": self.client_id,
+                        "available": False,
+                        "ws_connected": False,
                     }
                 )
 
@@ -709,24 +716,55 @@ class ComfyWSAPI:
         return None
 
     def _process_tasks(self):
-        """
-        Process tasks in the queue
-        """
+        """Process tasks in the queue"""
+        last_history_check = {}
+        history_check_interval = 60
+
         while self.running:
             try:
+                current_time = time.time()
                 for server_id, tasks in self.server_tasks.items():
-                    # Process pending tasks
+                    server = next(
+                        (s for s in self.servers if s["id"] == server_id), None
+                    )
+                    if not server:
+                        continue
+
                     for task in tasks:
-                        if task.get("status") == "pending":
-                            # Find the server
-                            server = next(
-                                (s for s in self.servers if s["id"] == server_id), None
-                            )
-                            if server and server["available"]:
-                                self._submit_task_to_server(task, server)
+                        status = task.get("status")
+                        prompt_id = task.get("prompt_id")
+                        task_key = f"{server_id}:{prompt_id}"
 
-                time.sleep(1)  # Check every second
+                        if status == "pending" and server["available"]:
+                            self._submit_task_to_server(task, server)
 
+                        elif prompt_id and status in ["submitted", "running"]:
+                            if (
+                                current_time - last_history_check.get(task_key, 0)
+                                >= history_check_interval
+                            ):
+                                last_history_check[task_key] = current_time
+                                try:
+                                    output_info, execution_time = self.get_task_history(
+                                        task, server_id
+                                    )
+                                    if output_info and not self._is_task_finished(task):
+                                        self._complete_task(
+                                            task["task_id"],
+                                            server_id,
+                                            True,
+                                            output_info=output_info,
+                                            execution_time=execution_time or 0,
+                                        )
+                                except:
+                                    pass
+
+                        if task_key in last_history_check and self._is_task_finished(
+                            task
+                        ):
+                            last_history_check.pop(task_key)
+
+                time.sleep(1)
             except Exception as e:
                 bt.logging.error(f"Error in task processing: {str(e)}")
                 time.sleep(5)
@@ -753,6 +791,7 @@ class ComfyWSAPI:
                 json={
                     "prompt": task["workflow_params"],
                     "client_id": server["client_id"],
+                    "uid": self.uid if self.uid is not None else None,
                     **({"prompt_id": task["task_id"]} if "task_id" in task else {}),
                 },
                 timeout=30,

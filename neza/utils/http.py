@@ -872,9 +872,15 @@ def batch_download_outputs(
                     if not filename:
                         continue
 
-                    subfolder_param = urllib.parse.quote(subfolder) if subfolder else ""
-                    file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={subfolder_param}"
+                    file_url = fileinfo.get("url")
                     headers = {}
+
+                    if not file_url:
+                        subfolder_param = (
+                            urllib.parse.quote(subfolder) if subfolder else ""
+                        )
+                        file_url = f"{comfy_url}/view?filename={filename}&type={file_type}&subfolder={subfolder_param}"
+                    
                     if token:
                         headers["Authorization"] = f"Bearer {token}"
 

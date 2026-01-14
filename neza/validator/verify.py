@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import time
 import threading
 import queue
+import hashlib
 from neza.api.comfy_ws_api import ComfyWSAPI
 from neza.utils.misc import copy_audio_wav
 import traceback
@@ -35,9 +36,16 @@ class VideoVerifier:
         self.model, self.device = self._get_model()
         self.validator = validator
 
+        client_id = hashlib.sha256(
+            validator.wallet.hotkey.ss58_address.encode()
+        ).hexdigest()[:32]
+
         # Create single ComfyWSAPI instance for all servers
         self.comfy_api = ComfyWSAPI(
-            validator.validator_config.comfy_servers, clear_queue=True
+            validator.validator_config.comfy_servers,
+            client_id=client_id,
+            uid=validator.uid,
+            clear_queue=True,
         )
 
         bt.logging.info(
@@ -462,6 +470,7 @@ class VideoVerifier:
                 avg_quality_score * quality_score_weight
                 + overall_speed_score * speed_score_weight
             )
+            final_score = min(1.0, final_score)
 
             # Build metrics
             metrics = {

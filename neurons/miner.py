@@ -9,6 +9,7 @@ import bittensor as bt
 import socket
 import traceback
 import urllib.parse
+import hashlib
 
 from neza.protocol import VideoTask, ComfySupport
 
@@ -46,9 +47,15 @@ class VideoMiner(BaseMinerNeuron):
 
     def __init__(self, config=None):
         super(VideoMiner, self).__init__(config=config)
+        hotkey = self.wallet.hotkey.ss58_address
         # Initialize ComfyUI WebSocket API instance
         servers = _parse_env_servers(os.environ.get("COMFYUI_SERVERS", ""))
-        self.comfy_api = ComfyWSAPI(servers, clear_queue=False)
+        self.comfy_api = ComfyWSAPI(
+            servers,
+            client_id=hashlib.sha256(hotkey.encode()).hexdigest()[:32],
+            uid=self.uid,
+            clear_queue=False,
+        )
 
         self.proxy_auth = ProxyAuthManager(self.wallet.hotkey.ss58_address)
 
